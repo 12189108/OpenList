@@ -3,11 +3,14 @@ package stream
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -514,4 +517,300 @@ func (r *RangeReadReadAtSeeker) Read(p []byte) (n int, err error) {
 	rc.cur += int64(n)
 	r.masterOff += int64(n)
 	return n, err
+}
+
+// ChunkInfo 存储分片上传的信息
+type ChunkInfo struct {
+	UploadID   string `json:"upload_id"`
+	ChunkIndex int    `json:"chunk_index"`
+	ChunkSize  int64  `json:"chunk_size"`
+	TotalSize  int64  `json:"total_size"`
+	TotalChunk int    `json:"total_chunk"`
+	FileName   string `json:"file_name"`
+	FilePath   string `json:"file_path"`
+	FileHash   string `json:"file_hash,omitempty"` // SHA256哈希值，用于校验
+}
+
+// ChunkedUploader 管理分片上传
+type ChunkedUploader struct {
+	mutex      sync.Mutex
+	uploadID   string
+	chunks     map[int]*os.File
+	chunkSize  int64
+	totalSize  int64
+	totalChunk int
+	fileName   string
+	filePath   string
+	completed  bool
+	mimetype   string
+	fileHash   string // 文件的SHA256哈希值，用于完整性校验
+}
+
+const DefaultChunkSize int64 = 5 * 1024 * 1024 // 5MB默认分片大小
+
+// NewChunkedUploader 创建新的分片上传管理器
+func NewChunkedUploader(fileName, filePath string, totalSize int64, chunkSize int64, fileHash string) *ChunkedUploader {
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+
+	totalChunk := int((totalSize + chunkSize - 1) / chunkSize)
+	uploadID := utils.NewUUID()
+
+	return &ChunkedUploader{
+		uploadID:   uploadID,
+		chunks:     make(map[int]*os.File),
+		chunkSize:  chunkSize,
+		totalSize:  totalSize,
+		totalChunk: totalChunk,
+		fileName:   fileName,
+		filePath:   filePath,
+		completed:  false,
+		mimetype:   utils.GetMimeType(fileName),
+		fileHash:   fileHash, // 保存文件哈希值
+	}
+}
+
+// UploadChunk 上传单个分片
+func (cu *ChunkedUploader) UploadChunk(chunkIndex int, reader io.Reader) error {
+	cu.mutex.Lock()
+	defer cu.mutex.Unlock()
+
+	if cu.completed {
+		return errors.New("upload already completed")
+	}
+
+	if chunkIndex < 0 || chunkIndex >= cu.totalChunk {
+		return errors.New("invalid chunk index")
+	}
+
+	// 创建临时文件存储分片
+	tmpFile, err := os.CreateTemp("", fmt.Sprintf("chunk_%s_%d", cu.uploadID, chunkIndex))
+	if err != nil {
+		return err
+	}
+
+	// 计算当前分片的大小
+	var chunkSize int64
+	if chunkIndex == cu.totalChunk-1 {
+		chunkSize = cu.totalSize - int64(chunkIndex)*cu.chunkSize
+	} else {
+		chunkSize = cu.chunkSize
+	}
+
+	// 将分片数据写入临时文件
+	written, err := io.CopyN(tmpFile, reader, chunkSize)
+	if err != nil && err != io.EOF {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return err
+	}
+
+	if written != chunkSize {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return fmt.Errorf("expected chunk size %d, got %d", chunkSize, written)
+	}
+
+	// 重置文件指针位置
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return err
+	}
+
+	// 如果已存在相同索引的分片，则删除旧的
+	if oldChunk, exists := cu.chunks[chunkIndex]; exists {
+		oldChunk.Close()
+		os.Remove(oldChunk.Name())
+	}
+
+	cu.chunks[chunkIndex] = tmpFile
+	return nil
+}
+
+// CompleteUpload 完成上传并合并所有分片
+func (cu *ChunkedUploader) CompleteUpload() (*FileStream, error) {
+	cu.mutex.Lock()
+	defer cu.mutex.Unlock()
+
+	if cu.completed {
+		return nil, errors.New("upload already completed")
+	}
+
+	// 检查是否所有分片都已上传
+	for i := 0; i < cu.totalChunk; i++ {
+		if _, exists := cu.chunks[i]; !exists {
+			return nil, fmt.Errorf("missing chunk at index %d", i)
+		}
+	}
+
+	// 创建临时文件用于合并
+	mergedFile, err := os.CreateTemp("", fmt.Sprintf("merged_%s", cu.uploadID))
+	if err != nil {
+		return nil, err
+	}
+
+	// 按顺序合并所有分片
+	for i := 0; i < cu.totalChunk; i++ {
+		chunk := cu.chunks[i]
+
+		// 确保读取位置在开始
+		if _, err := chunk.Seek(0, io.SeekStart); err != nil {
+			mergedFile.Close()
+			os.Remove(mergedFile.Name())
+			return nil, err
+		}
+
+		// 将分片数据复制到合并文件中
+		if _, err := io.Copy(mergedFile, chunk); err != nil {
+			mergedFile.Close()
+			os.Remove(mergedFile.Name())
+			return nil, err
+		}
+
+		// 关闭并删除分片文件
+		chunk.Close()
+		os.Remove(chunk.Name())
+		delete(cu.chunks, i)
+	}
+
+	// 将文件指针重置到开始位置
+	if _, err := mergedFile.Seek(0, io.SeekStart); err != nil {
+		mergedFile.Close()
+		os.Remove(mergedFile.Name())
+		return nil, err
+	}
+
+	// 如果提供了SHA256哈希值，进行校验
+	var hashInfo utils.HashInfo
+	if cu.fileHash != "" {
+		logrus.Infof("验证文件SHA256: %s", cu.fileHash)
+
+		// 计算合并后文件的SHA256哈希值
+		hasher := utils.NewMultiHasher([]*utils.HashType{utils.SHA256})
+
+		// 重置文件位置用于读取
+		if _, err := mergedFile.Seek(0, io.SeekStart); err != nil {
+			mergedFile.Close()
+			os.Remove(mergedFile.Name())
+			return nil, err
+		}
+
+		if _, err := io.Copy(hasher, mergedFile); err != nil {
+			mergedFile.Close()
+			os.Remove(mergedFile.Name())
+			return nil, err
+		}
+
+		// 获取哈希结果
+		hashValue, err := hasher.Sum(utils.SHA256)
+		if err != nil {
+			logrus.Warnf("无法计算SHA256哈希: %v", err)
+		} else {
+			calculatedHash := hex.EncodeToString(hashValue)
+
+			// 比较哈希值
+			if calculatedHash != cu.fileHash {
+				mergedFile.Close()
+				os.Remove(mergedFile.Name())
+				return nil, fmt.Errorf("文件哈希校验失败: 期望 %s, 实际 %s", cu.fileHash, calculatedHash)
+			}
+			logrus.Infof("文件哈希校验成功: %s", calculatedHash)
+			hashInfo = utils.NewHashInfo(utils.SHA256, calculatedHash)
+		}
+
+		// 再次重置文件位置以便后续读取
+		if _, err := mergedFile.Seek(0, io.SeekStart); err != nil {
+			mergedFile.Close()
+			os.Remove(mergedFile.Name())
+			return nil, err
+		}
+	}
+
+	// 创建 FileStream 对象
+	obj := &model.Object{
+		Name:     cu.fileName,
+		Size:     cu.totalSize,
+		Modified: time.Now(),
+	}
+
+	// 如果有哈希信息，则设置到对象中
+	if cu.fileHash != "" {
+		obj.HashInfo = hashInfo
+	}
+
+	fileStream := &FileStream{
+		Obj:      obj,
+		Reader:   mergedFile,
+		Mimetype: cu.mimetype,
+	}
+
+	fileStream.Add(mergedFile)
+	fileStream.SetTmpFile(mergedFile)
+
+	cu.completed = true
+	return fileStream, nil
+}
+
+// GetInfo 获取分片上传的信息
+func (cu *ChunkedUploader) GetInfo() ChunkInfo {
+	cu.mutex.Lock()
+	defer cu.mutex.Unlock()
+
+	return ChunkInfo{
+		UploadID:   cu.uploadID,
+		ChunkSize:  cu.chunkSize,
+		TotalSize:  cu.totalSize,
+		TotalChunk: cu.totalChunk,
+		FileName:   cu.fileName,
+		FilePath:   cu.filePath,
+		FileHash:   cu.fileHash, // 返回文件哈希值
+	}
+}
+
+// ChunkedUploaderManager 管理所有活跃的分片上传
+var ChunkedUploaderManager = NewChunkedUploaderManager()
+
+// ChunkedUploaderManager 结构体定义
+type chunkedUploaderManager struct {
+	mutex     sync.Mutex
+	uploaders map[string]*ChunkedUploader
+}
+
+// NewChunkedUploaderManager 创建新的上传管理器
+func NewChunkedUploaderManager() *chunkedUploaderManager {
+	return &chunkedUploaderManager{
+		uploaders: make(map[string]*ChunkedUploader),
+	}
+}
+
+// CreateUploader 创建新的分片上传并返回uploadID
+func (m *chunkedUploaderManager) CreateUploader(fileName, filePath string, totalSize int64, chunkSize int64, fileHash string) *ChunkedUploader {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	uploader := NewChunkedUploader(fileName, filePath, totalSize, chunkSize, fileHash)
+	m.uploaders[uploader.uploadID] = uploader
+	return uploader
+}
+
+// GetUploader 通过uploadID获取上传器
+func (m *chunkedUploaderManager) GetUploader(uploadID string) (*ChunkedUploader, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	uploader, exists := m.uploaders[uploadID]
+	if !exists {
+		return nil, errors.New("uploader not found")
+	}
+	return uploader, nil
+}
+
+// RemoveUploader 移除上传器
+func (m *chunkedUploaderManager) RemoveUploader(uploadID string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	delete(m.uploaders, uploadID)
 }

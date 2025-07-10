@@ -182,6 +182,14 @@ func _fs(g *gin.RouterGroup) {
 	uploadLimiter := middlewares.UploadRateLimiter(stream.ClientUploadLimit)
 	g.PUT("/put", middlewares.FsUp, uploadLimiter, handles.FsStream)
 	g.PUT("/form", middlewares.FsUp, uploadLimiter, handles.FsForm)
+
+	// 分片上传相关路由
+	chunk := g.Group("/chunk")
+	chunk.POST("/init", middlewares.FsUp, handles.ChunkUploadInit)
+	chunk.PUT("/upload", middlewares.FsUp, uploadLimiter, handles.ChunkUploadPart)
+	chunk.POST("/complete", middlewares.FsUp, handles.ChunkUploadComplete)
+	chunk.DELETE("/abort", middlewares.FsUp, handles.ChunkUploadAbort)
+
 	g.POST("/link", middlewares.AuthAdmin, handles.Link)
 	// g.POST("/add_aria2", handles.AddOfflineDownload)
 	// g.POST("/add_qbit", handles.AddQbittorrent)
