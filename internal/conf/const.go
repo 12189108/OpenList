@@ -137,6 +137,7 @@ const (
 	StreamMaxServerDownloadSpeed          = "max_server_download_speed"
 	StreamMaxServerUploadSpeed            = "max_server_upload_speed"
 	SliceTransmissionSize                 = "slice_transmission_size"
+	SliceTransmissionCount                = "slice_transmission_size"
 )
 
 const (

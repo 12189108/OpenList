@@ -223,6 +223,7 @@ func InitialSettings() []model.SettingItem {
 		{Key: conf.StreamMaxServerDownloadSpeed, Value: "-1", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PRIVATE},
 		{Key: conf.StreamMaxServerUploadSpeed, Value: "-1", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PRIVATE},
 		{Key: conf.SliceTransmissionSize, Value: "50", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PRIVATE},
+		{Key: conf.SliceTransmissionCount, Value: "3", Type: conf.TypeNumber, Group: model.TRAFFIC, Flag: model.PRIVATE},
 	}
 	initialSettingItems = append(initialSettingItems, tool.Tools.Items()...)
 	if flags.Dev {
