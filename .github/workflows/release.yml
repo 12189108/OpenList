@@ -1,6 +1,7 @@
 name: Release builds
 
 on:
+  workflow_dispatch:  # 添加手动触发选项
   release:
     types: [ published ]
 
@@ -8,10 +9,12 @@ permissions:
   contents: write
 
 jobs:
-  # Set release to prerelease first
+  # Set release to prerelease first (only run when triggered by release event)
   prerelease:
     name: Set Prerelease
     runs-on: ubuntu-latest
+    # 只在 release 事件触发时运行此任务
+    if: github.event_name == 'release'
     steps:
       - name: Prerelease
         uses: irongut/EditRelease@v1.2.0
@@ -22,11 +25,13 @@ jobs:
 
   # Main release job for all platforms
   release:
+    # 当手动触发时，不需要依赖 prerelease 任务
     needs: prerelease
+    if: ${{ always() }}
     strategy:
       matrix:
-        build-type: [ 'standard', 'lite' ]
-        target-platform: [ '', 'android', 'freebsd', 'linux_musl', 'linux_musl_arm' ]
+        build-type: [ 'standard' ]
+        target-platform: [ '', 'android','linux_musl', 'linux_musl_arm' ]
     name: Release ${{ matrix.target-platform && format('{0} ', matrix.target-platform) || '' }}${{ matrix.build-type == 'lite' && 'Lite' || '' }}
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +57,23 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          
+      # 获取最新标签，用于手动触发时的发布
+      - name: Get Latest Tag from GitHub
+        id: get_latest_tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          LATEST_TAG=$(curl -sL -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$LATEST_TAG" ]; then
+            echo "Failed to get latest release tag from OpenListTeam/OpenList. Trying to get the latest tag."
+            LATEST_TAG=$(curl -sL -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/OpenListTeam/OpenList/tags | grep -m 1 '"name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          echo "Using tag: $LATEST_TAG"
+        shell: bash
 
       - name: Install dependencies
         if: matrix.target-platform == ''
@@ -72,4 +94,4 @@ jobs:
         with:
           files: build/compress/*
           prerelease: false
-
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || env.LATEST_TAG }}

@@ -25,7 +25,7 @@ else
   git tag -d beta || true
   # Always true if there's no tag
   version=$(git describe --abbrev=0 --tags 2>/dev/null || echo "v0.0.0")
-  webVersion=$(eval "curl -fsSL --max-time 2 $githubAuthArgs \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest\"" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
+  webVersion=$(eval "curl -fsSL --max-time 2 $githubAuthArgs \"https://api.github.com/repos/12189108/OpenList-Frontend/releases/latest\"" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
 fi
 
 echo "backend version: $version"
@@ -46,12 +46,12 @@ ldflags="\
 "
 
 FetchWebDev() {
-  pre_release_tag=$(eval "curl -fsSL --max-time 2 $githubAuthArgs https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases" | jq -r 'map(select(.prerelease)) | first | .tag_name')
+  pre_release_tag=$(eval "curl -fsSL --max-time 2 $githubAuthArgs https://api.github.com/repos/12189108/OpenList-Frontend/releases" | jq -r 'map(select(.prerelease)) | first | .tag_name')
   if [ -z "$pre_release_tag" ] || [ "$pre_release_tag" == "null" ]; then
     # fall back to latest release
-    pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest\"")
+    pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/12189108/OpenList-Frontend/releases/latest\"")
   else
-    pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/tags/$pre_release_tag\"")
+    pre_release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/12189108/OpenList-Frontend/releases/tags/$pre_release_tag\"")
   fi
   pre_release_assets=$(echo "$pre_release_json" | jq -r '.assets[].browser_download_url')
   
@@ -68,7 +68,7 @@ FetchWebDev() {
 }
 
 FetchWebRelease() {
-  release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/OpenListTeam/OpenList-Frontend/releases/latest\"")
+  release_json=$(eval "curl -fsSL --max-time 2 $githubAuthArgs -H \"Accept: application/vnd.github.v3+json\" \"https://api.github.com/repos/12189108/OpenList-Frontend/releases/latest\"")
   release_assets=$(echo "$release_json" | jq -r '.assets[].browser_download_url')
   
   if [ "$useLite" = true ]; then
@@ -270,46 +270,6 @@ BuildReleaseAndroid() {
   done
 }
 
-BuildReleaseFreeBSD() {
-  rm -rf .git/
-  mkdir -p "build/freebsd"
-  
-  # Get latest FreeBSD 14.x release version from GitHub 
-  freebsd_version=$(eval "curl -fsSL --max-time 2 $githubAuthArgs \"https://api.github.com/repos/freebsd/freebsd-src/tags\"" | \
-    jq -r '.[].name' | \
-    grep '^release/14\.' | \
-    sort -V | \
-    tail -1 | \
-    sed 's/release\///' | \
-    sed 's/\.0$//')
-  
-  if [ -z "$freebsd_version" ]; then
-    echo "Failed to get FreeBSD version, falling back to 14.3"
-    freebsd_version="14.3"
-  fi
-
-  echo "Using FreeBSD version: $freebsd_version"
-  
-  OS_ARCHES=(amd64 arm64 i386)
-  GO_ARCHES=(amd64 arm64 386)
-  CGO_ARGS=(x86_64-unknown-freebsd${freebsd_version} aarch64-unknown-freebsd${freebsd_version} i386-unknown-freebsd${freebsd_version})
-  for i in "${!OS_ARCHES[@]}"; do
-    os_arch=${OS_ARCHES[$i]}
-    cgo_cc="clang --target=${CGO_ARGS[$i]} --sysroot=/opt/freebsd/${os_arch}"
-    echo building for freebsd-${os_arch}
-    sudo mkdir -p "/opt/freebsd/${os_arch}"
-    wget -q https://download.freebsd.org/releases/${os_arch}/${freebsd_version}-RELEASE/base.txz
-    sudo tar -xf ./base.txz -C /opt/freebsd/${os_arch}
-    rm base.txz
-    export GOOS=freebsd
-    export GOARCH=${GO_ARCHES[$i]}
-    export CC=${cgo_cc}
-    export CGO_ENABLED=1
-    export CGO_LDFLAGS="-fuse-ld=lld"
-    go build -o ./build/$appName-freebsd-$os_arch -ldflags="$ldflags" -tags=jsoniter .
-  done
-}
-
 MakeRelease() {
   cd build
   if [ -d compress ]; then
@@ -373,7 +333,7 @@ for arg in "$@"; do
         buildType="$arg"
       fi
       ;;
-    docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
+    docker|docker-multiplatform|linux_musl_arm|linux_musl|android|web)
       if [ -z "$dockerType" ]; then
         dockerType="$arg"
       fi
@@ -431,13 +391,6 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
     else
       MakeRelease "md5-android.txt"
     fi
-  elif [ "$dockerType" = "freebsd" ]; then
-    BuildReleaseFreeBSD
-    if [ "$useLite" = true ]; then
-      MakeRelease "md5-freebsd-lite.txt"
-    else
-      MakeRelease "md5-freebsd.txt"
-    fi
   elif [ "$dockerType" = "web" ]; then
     echo "web only"
   else
@@ -474,7 +427,7 @@ elif [ "$buildType" = "zip" ]; then
   fi
 else
   echo -e "Parameter error"
-  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
+  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|web] [lite] [other_params]"
   echo -e "Examples:"
   echo -e "  $0 dev"
   echo -e "  $0 dev lite"
