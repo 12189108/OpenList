@@ -17,6 +17,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server"
 	"github.com/OpenListTeam/sftpd-openlist"
@@ -157,6 +158,7 @@ the address is defined in config file`,
 				}()
 			}
 		}
+		stream.StartCleanupTask()
 		// Wait for interrupt signal to gracefully shutdown the server with
 		// a timeout of 1 second.
 		quit := make(chan os.Signal, 1)

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
@@ -528,7 +529,8 @@ type ChunkedUploader struct {
 	filePath   string
 	completed  bool
 	mimetype   string
-	fileHash   string // 文件的SHA256哈希值，用于完整性校验
+	fileHash   string    // 文件的SHA256哈希值，用于完整性校验
+	lastActive time.Time // 最后huo动时间，用于清理长时间未活动的上传
 }
 
 const DefaultChunkSize int64 = 5 * 1024 * 1024 // 5MB默认分片大小
@@ -552,7 +554,8 @@ func NewChunkedUploader(fileName, filePath string, totalSize int64, chunkSize in
 		filePath:   filePath,
 		completed:  false,
 		mimetype:   utils.GetMimeType(fileName),
-		fileHash:   fileHash, // 保存文件哈希值
+		fileHash:   fileHash,   // 保存文件哈希值
+		lastActive: time.Now(), // 初始化最后活动时间
 	}
 }
 
@@ -569,8 +572,11 @@ func (cu *ChunkedUploader) UploadChunk(chunkIndex int, reader io.Reader) error {
 		return errors.New("invalid chunk index")
 	}
 
-	// 创建临时文件存储分片
-	tmpFile, err := os.CreateTemp("", fmt.Sprintf("chunk_%s_%d", cu.uploadID, chunkIndex))
+	// 更新最后活动时间
+	cu.lastActive = time.Now()
+
+	// 使用配置中的临时目录创建临时文件存储片
+	tmpFile, err := os.CreateTemp(conf.Conf.TempDir, fmt.Sprintf("chunk_%s_%d", cu.uploadID, chunkIndex))
 	if err != nil {
 		return err
 	}
@@ -595,6 +601,13 @@ func (cu *ChunkedUploader) UploadChunk(chunkIndex int, reader io.Reader) error {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		return fmt.Errorf("expected chunk size %d, got %d", chunkSize, written)
+	}
+
+	// 确保数据实际写入磁盘
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return fmt.Errorf("failed to sync file: %v", err)
 	}
 
 	// 重置文件指针位置
@@ -738,6 +751,23 @@ func (cu *ChunkedUploader) CompleteUpload() (*FileStream, error) {
 	return fileStream, nil
 }
 
+// GetUploadedChunks 获取已上传的分片索引列表
+func (cu *ChunkedUploader) GetUploadedChunks() []int {
+	cu.mutex.Lock()
+	defer cu.mutex.Unlock()
+
+	// 更新最后活动时间
+	cu.lastActive = time.Now()
+
+	// 收集已上传的分片索引
+	uploadedChunks := make([]int, 0, len(cu.chunks))
+	for chunkIndex := range cu.chunks {
+		uploadedChunks = append(uploadedChunks, chunkIndex)
+	}
+
+	return uploadedChunks
+}
+
 // GetInfo 获取分片上传的信息
 func (cu *ChunkedUploader) GetInfo() ChunkInfo {
 	cu.mutex.Lock()
@@ -780,6 +810,38 @@ func (m *chunkedUploaderManager) CreateUploader(fileName, filePath string, total
 	return uploader
 }
 
+// CreateUploaderWithID 使用指定ID创建新的分片上传，适用于断点续传
+// 当网页刷新后，可以使用文件哈希作为ID恢复上传状态
+func (m *chunkedUploaderManager) CreateUploaderWithID(uploadID, fileName, filePath string, totalSize int64, chunkSize int64, fileHash string) *ChunkedUploader {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	// 检查是否已存在相同ID的上传器，如有则返回现有上传器
+	if existingUploader, exists := m.uploaders[uploadID]; exists {
+		// 更新最后活动时间
+		existingUploader.lastActive = time.Now()
+		return existingUploader
+	}
+
+	// 创建新的上传器，使用指定的ID
+	uploader := &ChunkedUploader{
+		uploadID:   uploadID, // 使用指定的上传ID
+		chunks:     make(map[int]*os.File),
+		chunkSize:  chunkSize,
+		totalSize:  totalSize,
+		totalChunk: int((totalSize + chunkSize - 1) / chunkSize),
+		fileName:   fileName,
+		filePath:   filePath,
+		completed:  false,
+		mimetype:   utils.GetMimeType(fileName),
+		fileHash:   fileHash,
+		lastActive: time.Now(),
+	}
+
+	m.uploaders[uploadID] = uploader
+	return uploader
+}
+
 // GetUploader 通过uploadID获取上传器
 func (m *chunkedUploaderManager) GetUploader(uploadID string) (*ChunkedUploader, error) {
 	m.mutex.Lock()
@@ -792,10 +854,65 @@ func (m *chunkedUploaderManager) GetUploader(uploadID string) (*ChunkedUploader,
 	return uploader, nil
 }
 
-// RemoveUploader 移除上传器
+// RemoveUploader 移除上传器并清理相关的临时文件
 func (m *chunkedUploaderManager) RemoveUploader(uploadID string) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	// 获取上传器并清理所有临时文件
+	if uploader, exists := m.uploaders[uploadID]; exists {
+		// 关闭并删除所有分片临时文件
+		for chunkIndex, chunkFile := range uploader.chunks {
+			if chunkFile != nil {
+				chunkFile.Close()
+				os.Remove(chunkFile.Name())
+				delete(uploader.chunks, chunkIndex)
+			}
+		}
+	}
+
+	// 从管理器中删除上传器
 	delete(m.uploaders, uploadID)
+}
+
+// 定期清理未活动的上传
+func (m *chunkedUploaderManager) CleanupInactiveUploads(timeout time.Duration) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	now := time.Now()
+	for uploadID, uploader := range m.uploaders {
+		// 检查最后活动时间是否超过超时限制
+		if now.Sub(uploader.lastActive) > timeout {
+			// 关闭并删除所有分片临时文件
+			for chunkIndex, chunkFile := range uploader.chunks {
+				if chunkFile != nil {
+					chunkFile.Close()
+					os.Remove(chunkFile.Name())
+					delete(uploader.chunks, chunkIndex)
+				}
+			}
+			// 从管理器中删除上传器
+			delete(m.uploaders, uploadID)
+			logrus.Infof("清理未活动上传: %s", uploadID)
+		}
+	}
+}
+
+// StartCleanupTask 启动定期清理任务，清理长时间未活动的上传
+// 此函数应在程序启动时调用
+func StartCleanupTask() {
+	const cleanupInterval = 30 * time.Minute // 每30分钟检查一次
+	const inactiveTimeout = 1 * time.Hour    // 2小时未活动的上传将被清理
+
+	go func() {
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			ChunkedUploaderManager.CleanupInactiveUploads(inactiveTimeout)
+		}
+	}()
+
+	logrus.Info("已启动分片上传清理任务，将定期清理长时间未活动的上传")
 }
