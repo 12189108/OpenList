@@ -44,8 +44,12 @@ func ChunkUploadInit(c *gin.Context) {
 		}
 	}
 
-	// 获取文件哈希值(可选)
+	// 获取文件哈希值(必需，用作上传ID)
 	fileHash := c.GetHeader("File-Hash")
+	if fileHash == "" {
+		common.ErrorStrResp(c, "File-Hash required for resumable upload", 400)
+		return
+	}
 
 	// 获取当前用户
 	user := c.MustGet("user").(*model.User)
@@ -66,12 +70,47 @@ func ChunkUploadInit(c *gin.Context) {
 		return
 	}
 
-	// 初始化分片上传
+	// 检查是否已经存在相同哈希的上传任务
 	_, fileName := path.Split(filePath)
-	uploader := stream.ChunkedUploaderManager.CreateUploader(fileName, filePath, totalSize, chunkSize, fileHash)
+	existingUploader, err := stream.ChunkedUploaderManager.GetUploader(fileHash)
 
-	// 返回上传ID和分片信息
-	common.SuccessResp(c, uploader.GetInfo())
+	// 创建响应数据
+	var respData gin.H
+
+	if err == nil {
+		// 如果已存在相同哈希的上传任务，直接返回该任务信息以及已上传的分片
+		info := existingUploader.GetInfo()
+		uploadedChunks := existingUploader.GetUploadedChunks()
+
+		respData = gin.H{
+			"upload_id":       info.UploadID,
+			"chunk_size":      info.ChunkSize,
+			"total_size":      info.TotalSize,
+			"total_chunk":     info.TotalChunk,
+			"file_name":       info.FileName,
+			"file_path":       info.FilePath,
+			"file_hash":       info.FileHash,
+			"uploaded_chunks": uploadedChunks, // 添加已上传的分片信息
+		}
+	} else {
+		// 如果不存在，创建新的上传任务，使用文件哈希作为上传ID
+		uploader := stream.ChunkedUploaderManager.CreateUploaderWithID(fileHash, fileName, filePath, totalSize, chunkSize, fileHash)
+		info := uploader.GetInfo()
+
+		respData = gin.H{
+			"upload_id":       info.UploadID,
+			"chunk_size":      info.ChunkSize,
+			"total_size":      info.TotalSize,
+			"total_chunk":     info.TotalChunk,
+			"file_name":       info.FileName,
+			"file_path":       info.FilePath,
+			"file_hash":       info.FileHash,
+			"uploaded_chunks": []int{}, // 新上传任务，没有已上传的分片
+		}
+	}
+
+	// 返回上传ID、分片信息和已上传的分片
+	common.SuccessResp(c, respData)
 }
 
 // ChunkUploadPart 上传一个分片
@@ -181,4 +220,28 @@ func ChunkUploadAbort(c *gin.Context) {
 	// 删除上传器
 	stream.ChunkedUploaderManager.RemoveUploader(uploadID)
 	common.SuccessResp(c)
+}
+
+// ChunkUploadStatus 获取分片上传状态
+func ChunkUploadStatus(c *gin.Context) {
+	// 获取上传ID
+	uploadID := c.GetHeader("Upload-ID")
+	if uploadID == "" {
+		common.ErrorStrResp(c, "Upload-ID required", 400)
+		return
+	}
+
+	// 获取上传器
+	uploader, err := stream.ChunkedUploaderManager.GetUploader(uploadID)
+	if err != nil {
+		common.ErrorResp(c, err, 404)
+		return
+	}
+
+	// 获取已上传的分片索引列表
+	uploadedChunks := uploader.GetUploadedChunks()
+
+	common.SuccessResp(c, gin.H{
+		"uploaded_chunks": uploadedChunks,
+	})
 }
