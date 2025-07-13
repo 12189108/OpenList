@@ -643,8 +643,8 @@ func (cu *ChunkedUploader) CompleteUpload() (*FileStream, error) {
 		}
 	}
 
-	// 创建临时文件用于合并
-	mergedFile, err := os.CreateTemp("", fmt.Sprintf("merged_%s", cu.uploadID))
+	// 创建临时文件用于合并，使用配置中的临时目录
+	mergedFile, err := os.CreateTemp(conf.Conf.TempDir, fmt.Sprintf("merged_%s", cu.uploadID))
 	if err != nil {
 		return nil, err
 	}
