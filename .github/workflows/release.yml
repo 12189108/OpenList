@@ -73,6 +73,28 @@ jobs:
           fi
           echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
           echo "Using tag: $LATEST_TAG"
+          
+          # 设置git用户信息（必须设置，否则无法创建标签）
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 在本地创建标签，确保git describe能找到标签
+          git tag -f $LATEST_TAG
+        shell: bash
+
+      # 确保release事件触发时也设置本地git标签
+      - name: Set Tag for Release Event
+        if: github.event_name == 'release'
+        run: |
+          echo "LATEST_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "Using release tag: ${{ github.event.release.tag_name }}"
+          
+          # 设置git用户信息
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # 在本地创建标签，确保git describe能找到标签
+          git tag -f ${{ github.event.release.tag_name }}
         shell: bash
 
       - name: Install dependencies
