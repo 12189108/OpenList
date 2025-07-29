@@ -173,19 +173,6 @@ func (d *Local) FileInfoToObj(ctx context.Context, f fs.FileInfo, reqPath string
 	}
 	return &file
 }
-func (d *Local) GetMeta(ctx context.Context, path string) (model.Obj, error) {
-	f, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	file := d.FileInfoToObj(ctx, f, path, path)
-	//h := "123123"
-	//if s, ok := f.(model.SetHash); ok && file.GetHash() == ("","")  {
-	//	s.SetHash(h,"SHA1")
-	//}
-	return file, nil
-
-}
 
 func (d *Local) Get(ctx context.Context, path string) (model.Obj, error) {
 	path = filepath.Join(d.GetRootPath(), path)
@@ -241,10 +228,17 @@ func (d *Local) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			if err != nil {
 				return nil, err
 			}
+			// Get thumbnail file size for Content-Length
+			stat, err := open.Stat()
+			if err != nil {
+				open.Close()
+				return nil, err
+			}
+			link.ContentLength = int64(stat.Size())
 			link.MFile = open
 		} else {
 			link.MFile = bytes.NewReader(buf.Bytes())
-			//link.Header.Set("Content-Length", strconv.Itoa(buf.Len()))
+			link.ContentLength = int64(buf.Len())
 		}
 	} else {
 		open, err := os.Open(fullPath)

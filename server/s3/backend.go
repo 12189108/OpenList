@@ -14,6 +14,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -108,7 +109,7 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 
 	fp := path.Join(bucketPath, objectName)
 	fmeta, _ := op.GetNearestMeta(fp)
-	node, err := fs.Get(context.WithValue(ctx, "meta", fmeta), fp, &fs.GetArgs{})
+	node, err := fs.Get(context.WithValue(ctx, conf.MetaKey, fmeta), fp, &fs.GetArgs{})
 	if err != nil {
 		return nil, gofakes3.KeyNotFound(objectName)
 	}
@@ -151,7 +152,7 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 
 	fp := path.Join(bucketPath, objectName)
 	fmeta, _ := op.GetNearestMeta(fp)
-	node, err := fs.Get(context.WithValue(ctx, "meta", fmeta), fp, &fs.GetArgs{})
+	node, err := fs.Get(context.WithValue(ctx, conf.MetaKey, fmeta), fp, &fs.GetArgs{})
 	if err != nil {
 		return nil, gofakes3.KeyNotFound(objectName)
 	}
@@ -170,7 +171,10 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 		}
 	}()
 
-	size := file.GetSize()
+	size := link.ContentLength
+	if size <= 0 {
+		size = file.GetSize()
+	}
 	rnge, err := rangeRequest.Range(size)
 	if err != nil {
 		return nil, err
@@ -247,7 +251,7 @@ func (b *s3Backend) PutObject(
 	}
 	log.Debugf("reqPath: %s", reqPath)
 	fmeta, _ := op.GetNearestMeta(fp)
-	ctx = context.WithValue(ctx, "meta", fmeta)
+	ctx = context.WithValue(ctx, conf.MetaKey, fmeta)
 
 	_, err = fs.Get(ctx, reqPath, &fs.GetArgs{})
 	if err != nil {
@@ -341,7 +345,7 @@ func (b *s3Backend) deleteObject(ctx context.Context, bucketName, objectName str
 	fmeta, _ := op.GetNearestMeta(fp)
 	// S3 does not report an error when attemping to delete a key that does not exist, so
 	// we need to skip IsNotExist errors.
-	if _, err := fs.Get(context.WithValue(ctx, "meta", fmeta), fp, &fs.GetArgs{}); err != nil && !errs.IsObjectNotFound(err) {
+	if _, err := fs.Get(context.WithValue(ctx, conf.MetaKey, fmeta), fp, &fs.GetArgs{}); err != nil && !errs.IsObjectNotFound(err) {
 		return err
 	}
 
@@ -388,7 +392,7 @@ func (b *s3Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 
 	srcFp := path.Join(srcBucketPath, srcKey)
 	fmeta, _ := op.GetNearestMeta(srcFp)
-	srcNode, err := fs.Get(context.WithValue(ctx, "meta", fmeta), srcFp, &fs.GetArgs{})
+	srcNode, err := fs.Get(context.WithValue(ctx, conf.MetaKey, fmeta), srcFp, &fs.GetArgs{})
 
 	c, err := b.GetObject(ctx, srcBucket, srcKey, nil)
 	if err != nil {

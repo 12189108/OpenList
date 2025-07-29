@@ -1,6 +1,8 @@
 package data
 
 import (
+	"fmt"
+	"time"
 	"os"
 
 	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
@@ -33,12 +35,13 @@ func initUser() {
 				BasePath: "/",
 				Authn:    "[]",
 				// 0(can see hidden) - 7(can remove) & 12(can read archives) - 13(can decompress archives)
-				Permission: 0x30FF,
+				Permission: 0x31FF,
 			}
 			if err := op.CreateUser(admin); err != nil {
 				panic(err)
 			} else {
 				utils.Log.Infof("Successfully created the admin user and the initial password is: %s", adminPassword)
+				fmt.Printf("\033[36mINFO\033[39m[%s] Successfully created the admin user and the initial password is: %s\n", time.Now().Format("2006-01-02 15:04:05"), adminPassword)
 			}
 		} else {
 			utils.Log.Fatalf("[init user] Failed to get admin user: %v", err)

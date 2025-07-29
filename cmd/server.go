@@ -20,6 +20,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server"
+	"github.com/OpenListTeam/OpenList/v4/server/middlewares"
 	"github.com/OpenListTeam/sftpd-openlist"
 	ftpserver "github.com/fclairamb/ftpserverlib"
 	"github.com/gin-gonic/gin"
@@ -48,7 +49,15 @@ the address is defined in config file`,
 			gin.SetMode(gin.ReleaseMode)
 		}
 		r := gin.New()
-		r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
+
+		// gin log
+		if conf.Conf.Log.Filter.Enable {
+			r.Use(middlewares.FilteredLogger())
+		} else {
+			r.Use(gin.LoggerWithWriter(log.StandardLogger().Out))
+		}
+		r.Use(gin.RecoveryWithWriter(log.StandardLogger().Out))
+
 		server.Init(r)
 		var httpHandler http.Handler = r
 		if conf.Conf.Scheme.EnableH2c {
