@@ -20,6 +20,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server"
+	"github.com/OpenListTeam/OpenList/v4/server/middlewares"
 	"github.com/OpenListTeam/sftpd-openlist"
 	ftpserver "github.com/fclairamb/ftpserverlib"
 	"github.com/gin-gonic/gin"
@@ -48,7 +49,15 @@ the address is defined in config file`,
 			gin.SetMode(gin.ReleaseMode)
 		}
 		r := gin.New()
-		r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
+
+		// gin log
+		if conf.Conf.Log.Filter.Enable {
+			r.Use(middlewares.FilteredLogger())
+		} else {
+			r.Use(gin.LoggerWithWriter(log.StandardLogger().Out))
+		}
+		r.Use(gin.RecoveryWithWriter(log.StandardLogger().Out))
+
 		server.Init(r)
 		var httpHandler http.Handler = r
 		if conf.Conf.Scheme.EnableH2c {
@@ -57,6 +66,7 @@ the address is defined in config file`,
 		var httpSrv, httpsSrv, unixSrv *http.Server
 		if conf.Conf.Scheme.HttpPort != -1 {
 			httpBase := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.Scheme.HttpPort)
+			fmt.Printf("start HTTP server @ %s\n", httpBase)
 			utils.Log.Infof("start HTTP server @ %s", httpBase)
 			httpSrv = &http.Server{Addr: httpBase, Handler: httpHandler}
 			go func() {
@@ -68,6 +78,7 @@ the address is defined in config file`,
 		}
 		if conf.Conf.Scheme.HttpsPort != -1 {
 			httpsBase := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.Scheme.HttpsPort)
+			fmt.Printf("start HTTPS server @ %s\n", httpsBase)
 			utils.Log.Infof("start HTTPS server @ %s", httpsBase)
 			httpsSrv = &http.Server{Addr: httpsBase, Handler: r}
 			go func() {
@@ -78,6 +89,7 @@ the address is defined in config file`,
 			}()
 		}
 		if conf.Conf.Scheme.UnixFile != "" {
+			fmt.Printf("start unix server @ %s\n", conf.Conf.Scheme.UnixFile)
 			utils.Log.Infof("start unix server @ %s", conf.Conf.Scheme.UnixFile)
 			unixSrv = &http.Server{Handler: httpHandler}
 			go func() {
@@ -106,6 +118,7 @@ the address is defined in config file`,
 			s3r.Use(gin.LoggerWithWriter(log.StandardLogger().Out), gin.RecoveryWithWriter(log.StandardLogger().Out))
 			server.InitS3(s3r)
 			s3Base := fmt.Sprintf("%s:%d", conf.Conf.Scheme.Address, conf.Conf.S3.Port)
+			fmt.Printf("start S3 server @ %s\n", s3Base)
 			utils.Log.Infof("start S3 server @ %s", s3Base)
 			go func() {
 				var err error
@@ -130,6 +143,7 @@ the address is defined in config file`,
 			if err != nil {
 				utils.Log.Fatalf("failed to start ftp driver: %s", err.Error())
 			} else {
+				fmt.Printf("start ftp server on %s\n", conf.Conf.FTP.Listen)
 				utils.Log.Infof("start ftp server on %s", conf.Conf.FTP.Listen)
 				go func() {
 					ftpServer = ftpserver.NewFtpServer(ftpDriver)
@@ -148,6 +162,7 @@ the address is defined in config file`,
 			if err != nil {
 				utils.Log.Fatalf("failed to start sftp driver: %s", err.Error())
 			} else {
+				fmt.Printf("start sftp server on %s", conf.Conf.SFTP.Listen)
 				utils.Log.Infof("start sftp server on %s", conf.Conf.SFTP.Listen)
 				go func() {
 					sftpServer = sftpd.NewSftpServer(sftpDriver)

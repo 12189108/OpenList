@@ -17,7 +17,7 @@ const (
 	AllowMounted = "allow_mounted"
 	RobotsTxt    = "robots_txt"
 
-	Logo      = "logo"
+	Logo      = "logo" // multi-lines text, L1: light, EOL: dark
 	Favicon   = "favicon"
 	MainColor = "main_color"
 
@@ -71,6 +71,9 @@ const (
 
 	// thunder
 	ThunderTempDir = "thunder_temp_dir"
+
+	// thunderx
+	ThunderXTempDir = "thunderx_temp_dir"
 
 	// thunder_browser
 	ThunderBrowserTempDir = "thunder_browser_temp_dir"
@@ -151,7 +154,19 @@ const (
 )
 
 // ContextKey is the type of context keys.
+type ContextKey int
+
 const (
-	NoTaskKey = "no_task"
-	ApiUrlKey = "api_url"
+	_ ContextKey = iota
+
+	NoTaskKey
+	ApiUrlKey
+	UserKey
+	MetaKey
+	MetaPassKey
+	ClientIPKey
+	ProxyHeaderKey
+	RequestHeaderKey
+	UserAgentKey
+	PathKey
 )
