@@ -276,9 +276,7 @@ func (d *ILanZou) Put(ctx context.Context, dstDir model.Obj, s model.FileStreame
 	etag := s.GetHash().GetHash(utils.MD5)
 	var err error
 	if len(etag) != utils.MD5.Width {
-		cacheFileProgress := model.UpdateProgressWithRange(up, 0, 50)
-		up = model.UpdateProgressWithRange(up, 50, 100)
-		_, etag, err = stream.CacheFullInTempFileAndHash(s, cacheFileProgress, utils.MD5)
+		_, etag, err = stream.CacheFullAndHash(s, &up, utils.MD5)
 		if err != nil {
 			return nil, err
 		}
@@ -298,6 +296,23 @@ func (d *ILanZou) Put(ctx context.Context, dstDir model.Obj, s model.FileStreame
 		return nil, err
 	}
 	upToken := utils.Json.Get(res, "upToken").ToString()
+	if upToken == "-1" {
+		// 支持秒传
+		var resp UploadTokenRapidResp
+		err := utils.Json.Unmarshal(res, &resp)
+		if err != nil {
+			return nil, err
+		}
+		return &model.Object{
+			ID:       strconv.FormatInt(resp.Map.FileID, 10),
+			Name:     resp.Map.FileName,
+			Size:     s.GetSize(),
+			Modified: s.ModTime(),
+			Ctime:    s.CreateTime(),
+			IsFolder: false,
+			HashInfo: utils.NewHashInfo(utils.MD5, etag),
+		}, nil
+	}
 	now := time.Now()
 	key := fmt.Sprintf("disk/%d/%d/%d/%s/%016d", now.Year(), now.Month(), now.Day(), d.account, now.UnixMilli())
 	reader := driver.NewLimitedUploadStream(ctx, &driver.ReaderUpdatingProgress{
