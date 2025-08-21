@@ -5,13 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"math"
-	"os"
-	"sync"
-	"time"
-	"sync"
-
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -19,7 +12,13 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/rclone/rclone/lib/mmap"
+	"github.com/sirupsen/logrus"
 	"go4.org/readerutil"
+	"io"
+	"math"
+	"os"
+	"sync"
+	"time"
 )
 
 type FileStream struct {
