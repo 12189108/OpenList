@@ -222,27 +222,3 @@ func ChunkUploadAbort(c *gin.Context) {
 	stream.ChunkedUploaderManager.RemoveUploader(uploadID)
 	common.SuccessResp(c)
 }
-
-// ChunkUploadStatus 获取分片上传状态
-func ChunkUploadStatus(c *gin.Context) {
-	// 获取上传ID
-	uploadID := c.GetHeader("Upload-ID")
-	if uploadID == "" {
-		common.ErrorStrResp(c, "Upload-ID required", 400)
-		return
-	}
-
-	// 获取上传器
-	uploader, err := stream.ChunkedUploaderManager.GetUploader(uploadID)
-	if err != nil {
-		common.ErrorResp(c, err, 404)
-		return
-	}
-
-	// 获取已上传的分片索引列表
-	uploadedChunks := uploader.GetUploadedChunks()
-
-	common.SuccessResp(c, gin.H{
-		"uploaded_chunks": uploadedChunks,
-	})
-}
