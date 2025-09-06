@@ -35,19 +35,6 @@ jobs:
     name: Release ${{ matrix.target-platform && format('{0} ', matrix.target-platform) || '' }}${{ matrix.build-type == 'lite' && 'Lite' || '' }}
     runs-on: ubuntu-latest
     steps:
-
-      - name: Free Disk Space (Ubuntu)
-        if: matrix.target-platform == ''
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
