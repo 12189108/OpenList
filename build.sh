@@ -118,7 +118,7 @@ BuildDev() {
     export CGO_ENABLED=1
     go build -o ./dist/$appName-$os_arch -ldflags="$muslflags" -tags=jsoniter .
   done
-  xgo -targets=windows/amd64,darwin/amd64,darwin/arm64 -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
+  xgo -targets=windows/amd64,linux/amd64 -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
   mv "$appName"-* dist
   cd dist
   cp ./"$appName"-windows-amd64.exe ./"$appName"-windows-amd64-upx.exe
