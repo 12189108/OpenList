@@ -5,6 +5,7 @@ import (
 	"path"
 	"strconv"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
@@ -52,7 +53,7 @@ func ChunkUploadInit(c *gin.Context) {
 	}
 
 	// 获取当前用户
-	user := c.MustGet("user").(*model.User)
+	user := c.Request.Context().Value(conf.UserKey).(*model.User)
 	filePath, err = user.JoinPath(filePath)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
