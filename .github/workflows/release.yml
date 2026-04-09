@@ -49,15 +49,15 @@ jobs:
           musl-target-format: $os-$musl-$arch
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
-          # 添加了 -s -w 移除调试符号，减小体积
-          ldflags: -s -w
+          # 使用 flags 输入传递去掉调试信息的 -ldflags "-s -w" 参数
+          flags: -ldflags "-s -w"
           x-flags: |
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          # 修改输出文件名，增加平台名称，防止互相覆盖
+          # 加上目标平台防止同名文件相互覆盖
           output: openlist-${{ matrix.target }}$ext
 
       - name: Upload artifact
