@@ -17,105 +17,55 @@ jobs:
   build:
     strategy:
       matrix:
-        include:
-          # 精准定义你要的 4 个平台
-          - target: windows-amd64
-            os: windows
-            arch: amd64
-          - target: windows-arm64
-            os: windows
-            arch: arm64
-          - target: linux-amd64-musl
-            os: linux
-            arch: amd64
-          - target: linux-arm64-musl
-            os: linux
-            arch: arm64
+        target:
+          # 你要求的 4 个精准平台
+          - windows-amd64
+          - windows-arm64
+          - linux-amd64-musl
+          - linux-arm64-musl
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25.0"
 
-      - name: Setup Web Frontend
-        # 执行脚本拉取你指定的前端资源
+      - name: Setup web
+        # 拉取你的定制前端
         run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FRONTEND_REPO: "12189108/OpenList-Frontend"
 
-      - name: Install Cross-Compilers (Bypass Snap)
-        # 绕过崩溃的 Snap 商店，手动安装所需的交叉编译工具链
+      - name: Build
+        # 使用官方稳定的插件，保证静态链接正确，程序绝对能跑
+        uses: OpenListTeam/cgo-actions@v1.2.2
+        with:
+          targets: ${{ matrix.target }}
+          musl-target-format: $os-$musl-$arch
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          out-dir: build
+          x-flags: |
+            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
+            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+          # 加上目标后缀防止重名覆盖
+          output: openlist-${{ matrix.target }}$ext
+
+      - name: Strip Debug Info
+        # 核心黑科技：编译完成后，直接在底层剔除所有调试信息，体积立减！(效果等同于 -s -w)
         run: |
-          # 1. 下载 Zig (用于 Windows arm64)
-          wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
-          tar -xf zig-linux-x86_64-0.11.0.tar.xz
-          sudo mv zig-linux-x86_64-0.11.0 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-          
-          # 2. 安装 MinGW (用于 Windows amd64)
-          sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-          
-          # 3. 下载 Musl 编译器 (用于 Linux)
-          BASE="https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
-          curl -fsSL -o x86_64-musl.tgz "${BASE}x86_64-linux-musl-cross.tgz"
-          curl -fsSL -o aarch64-musl.tgz "${BASE}aarch64-linux-musl-cross.tgz"
-          sudo tar xf x86_64-musl.tgz --strip-components 1 -C /usr/local
-          sudo tar xf aarch64-musl.tgz --strip-components 1 -C /usr/local
-
-      - name: Build Binary (Strip Debug Info)
-        # 直接使用 Go 官方命令，原生支持 -s -w，不会再报错！
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          BUILT_AT="$(date +'%F %T %z')"
-          GIT_AUTHOR="The OpenList Projects Contributors <noreply@openlist.team>"
-          GIT_COMMIT=$(git log --pretty=format:"%h" -1 || echo "unknown")
-          WEB_VERSION="rolling"
-          EXTRA_LDFLAGS=""
-
-          export CGO_ENABLED=1
-          export GOOS=${{ matrix.os }}
-          export GOARCH=${{ matrix.arch }}
-
-          # 自动匹配编译器
-          if [ "${{ matrix.target }}" == "windows-amd64" ]; then
-            export CC=x86_64-w64-mingw32-gcc
-            export CXX=x86_64-w64-mingw32-g++
-            EXT=".exe"
-          elif [ "${{ matrix.target }}" == "windows-arm64" ]; then
-            chmod +x ./wrapper/zcc-arm64 ./wrapper/zcxx-arm64
-            export CC=$(pwd)/wrapper/zcc-arm64
-            export CXX=$(pwd)/wrapper/zcxx-arm64
-            EXT=".exe"
-          elif [ "${{ matrix.target }}" == "linux-amd64-musl" ]; then
-            export CC=x86_64-linux-musl-gcc
-            export CXX=x86_64-linux-musl-g++
-            EXTRA_LDFLAGS="-extldflags '-static -fpic'"
-            EXT=""
-          elif [ "${{ matrix.target }}" == "linux-arm64-musl" ]; then
-            export CC=aarch64-linux-musl-gcc
-            export CXX=aarch64-linux-musl-g++
-            EXTRA_LDFLAGS="-extldflags '-static -fpic'"
-            EXT=""
-          fi
-
-          mkdir -p build
-          
-          # 【核心瘦身命令】：这里的 -s -w 会完美移除调试信息和符号表，无需任何插件！
-          go build -o build/openlist-${{ matrix.target }}$EXT \
-            -ldflags="-s -w \
-            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' \
-            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' \
-            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' \
-            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' \
-            -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$WEB_VERSION' \
-            $EXTRA_LDFLAGS" \
-            -tags=jsoniter .
+          sudo apt-get update && sudo apt-get install -y binutils
+          strip build/* || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
