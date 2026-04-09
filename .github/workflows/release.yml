@@ -25,69 +25,59 @@ jobs:
         with:
           go-version: "1.25.0"
 
-      - name: Build All 4 Targets Natively (No Plugins, No Bugs)
+      - name: Setup web
+        # 拉取你指定的自有前端仓库
+        run: bash build.sh release web
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRONTEND_REPO: "12189108/OpenList-Frontend"
+
+      - name: Install Toolchains
+        # 安装标准的 Linux ARM64 和 Windows 交叉编译器 (不用 Snap，极速且不报错)
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          export FRONTEND_REPO="12189108/OpenList-Frontend"
-          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
           
-          echo "==== 1. 获取专属前端 ===="
-          bash build.sh release web
-
-          echo "==== 2. 准备交叉编译工具链 (绕过报错的Snap) ===="
-          # 安装 Windows amd64 编译器
-          sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-          
-          # 下载 Linux Musl 编译器
-          BASE="https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
-          curl -fsSL -o x86_64.tgz "${BASE}x86_64-linux-musl-cross.tgz"
-          curl -fsSL -o aarch64.tgz "${BASE}aarch64-linux-musl-cross.tgz"
-          sudo tar xf x86_64.tgz --strip-components 1 -C /usr/local
-          sudo tar xf aarch64.tgz --strip-components 1 -C /usr/local
-
-          # 下载 Zig (用于 Windows arm64)
+          # 下载 Zig 用于 Windows ARM64
           wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
           tar -xf zig-linux-x86_64-0.11.0.tar.xz
-          export PATH="$PWD/zig-linux-x86_64-0.11.0:$PATH"
 
-          echo "==== 3. 配置原生参数 (包含 -s -w 完美瘦身) ===="
+      - name: Build Binaries
+        run: |
+          # 准备环境变量
+          export PATH="$PWD/zig-linux-x86_64-0.11.0:$PATH"
+          export CGO_ENABLED=1
+          
           mkdir -p build
+          VERSION="${{ github.event.inputs.version }}"
           BUILT_AT="$(date +'%F %T %z')"
           GIT_AUTHOR="The OpenList Projects Contributors <noreply@openlist.team>"
           GIT_COMMIT=$(git log --pretty=format:"%h" -1 || echo "unknown")
           
-          # 注意：这里的 -s -w 会在编译时原生且安全地去除调试信息，绝不破坏程序！
-          LDFLAGS="-s -w \
-          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' \
-          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' \
-          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' \
-          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' \
-          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'"
+          echo "==== 1. 编译 Linux AMD64 (标准版，你的服务器能直接跑) ===="
+          GOOS=linux GOARCH=amd64 CC=gcc CXX=g++ \
+          go build -o build/openlist-linux-amd64 \
+          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
+          -tags=jsoniter .
+          
+          echo "==== 2. 编译 Linux ARM64 (标准版) ===="
+          GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+          go build -o build/openlist-linux-arm64 \
+          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
+          -tags=jsoniter .
 
-          export CGO_ENABLED=1
+          echo "==== 3. 编译 Windows AMD64 ===="
+          GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
+          go build -o build/openlist-windows-amd64.exe \
+          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
+          -tags=jsoniter .
 
-          echo "==== 4. 开始精准编译 4 个目标 ===="
-
-          # 目标 1: Linux amd64 musl (纯静态，放到任何Linux直接跑)
-          echo "Building linux-amd64-musl..."
-          CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOOS=linux GOARCH=amd64 \
-          go build -o build/openlist-linux-amd64-musl -ldflags="--extldflags '-static -fpic' $LDFLAGS" -tags=jsoniter .
-
-          # 目标 2: Linux arm64 musl
-          echo "Building linux-arm64-musl..."
-          CC=aarch64-linux-musl-gcc CXX=aarch64-linux-musl-g++ GOOS=linux GOARCH=arm64 \
-          go build -o build/openlist-linux-arm64-musl -ldflags="--extldflags '-static -fpic' $LDFLAGS" -tags=jsoniter .
-
-          # 目标 3: Windows amd64
-          echo "Building windows-amd64..."
-          CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ GOOS=windows GOARCH=amd64 \
-          go build -o build/openlist-windows-amd64.exe -ldflags="$LDFLAGS" -tags=jsoniter .
-
-          # 目标 4: Windows arm64
-          echo "Building windows-arm64..."
+          echo "==== 4. 编译 Windows ARM64 ===="
           chmod +x ./wrapper/zcc-arm64 ./wrapper/zcxx-arm64
-          CC=$(pwd)/wrapper/zcc-arm64 CXX=$(pwd)/wrapper/zcxx-arm64 GOOS=windows GOARCH=arm64 \
-          go build -o build/openlist-windows-arm64.exe -ldflags="$LDFLAGS" -tags=jsoniter .
+          GOOS=windows GOARCH=arm64 CC=$PWD/wrapper/zcc-arm64 CXX=$PWD/wrapper/zcxx-arm64 \
+          go build -o build/openlist-windows-arm64.exe \
+          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
+          -tags=jsoniter .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
