@@ -18,7 +18,6 @@ jobs:
     strategy:
       matrix:
         target:
-          # 精确控制你需要的 4 个平台
           - windows-amd64
           - windows-arm64
           - linux-amd64-musl
@@ -38,7 +37,6 @@ jobs:
           go-version: "1.25.0"
 
       - name: Setup web
-        # 获取你的专属前端仓库
         run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,32 +47,32 @@ jobs:
         with:
           targets: ${{ matrix.target }}
           musl-target-format: $os-$musl-$arch
-          # 【核心修复1】开启纯静态链接，彻底解决 cannot execute 的报错！
+          # 开启静态链接，修复 Linux 下 "required file not found" 错误
           static-link-for-musl: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
-          # -trimpath 可以去掉文件路径信息，略微优化
-          flags: -trimpath -tags=jsoniter
+          # 删除了引发 Bug 的 flags 参数，保持最原始的纯净配置！
           x-flags: |
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
             github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
             github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+          # 加上目标后缀，防止生成的文件同名互相覆盖
           output: openlist-${{ matrix.target }}$ext
 
-      - name: Strip Debug Info (Remove Symbols)
-        # 【核心修复2】编译完后通过底层命令剔除所有调试信息，效果等同于 -s -w，体积瞬间变小！
+      - name: Strip Debug Info and Compress
+        # 在这里执行系统级去调试信息，完美避开 Go 编译器的报错！
         run: |
           sudo apt-get update && sudo apt-get install -y binutils binutils-mingw-w64 upx-ucl
           
-          # 1. 剥离 Linux 程序的调试信息
+          # 剔除 Linux 程序的调试信息
           strip build/openlist-linux-* || true
           
-          # 2. 剥离 Windows amd64 程序的调试信息
+          # 剔除 Windows amd64 程序的调试信息
           x86_64-w64-mingw32-strip build/openlist-windows-amd64* || true
           
-          # 3. 最后使用 UPX 进行终极压缩 (遇到不支持的架构会自动跳过不报错)
+          # 进一步极限压缩，体积立减
           upx -9 build/* || true
 
       - name: Upload artifact
