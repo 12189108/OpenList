@@ -14,73 +14,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        target:
-          - windows-amd64
-          - linux-arm64-musl
-          - linux-amd64-musl
-          - windows-arm64
-    name: Build ${{ matrix.target }}
+  build_and_release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - uses: benjlevesque/short-sha@v3.0
-        id: short-sha
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25.0"
 
-      - name: Setup web
-        run: bash build.sh release web
+      - name: Install xgo
+        # xgo 用于交叉编译 Windows amd64
+        run: go install src.techknowlogick.com/xgo@latest
+
+      - name: Build All Targets
+        # 运行我们在 build.sh 中新增的 custom_release 分支
+        run: bash build.sh release custom_release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
           FRONTEND_REPO: "12189108/OpenList-Frontend"
-
-      - name: Build
-        uses: OpenListTeam/cgo-actions@v1.2.2
-        with:
-          targets: ${{ matrix.target }}
-          musl-target-format: $os-$musl-$arch
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          out-dir: build
-          x-flags: |
-            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          # 加上目标平台防止同名文件相互覆盖
-          output: openlist-${{ matrix.target }}$ext
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openlist_${{ matrix.target }}
+          name: openlist-binaries
           path: build/*
-
-  release:
-    needs: build
-    name: Publish Release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: build-assets
-          merge-multiple: true
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: Release ${{ github.event.inputs.version }}
-          files: build-assets/*
+          files: build/*
           draft: false
           prerelease: false
         env:
