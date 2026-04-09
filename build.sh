@@ -653,6 +653,39 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
     fi
   elif [ "$dockerType" = "web" ]; then
     echo "web only"
+  elif [ "$dockerType" = "custom_release" ]; then
+    rm -rf .git/
+    mkdir -p "build"
+    
+    # 构建 Linux Musl (amd64 & arm64)
+    muslflags="--extldflags '-static -fpic' $ldflags"
+    BASE="https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
+    FILES=(x86_64-linux-musl-cross aarch64-linux-musl-cross)
+    for i in "${FILES[@]}"; do
+      url="${BASE}${i}.tgz"
+      curl -fsSL -o "${i}.tgz" "${url}"
+      sudo tar xf "${i}.tgz" --strip-components 1 -C /usr/local
+      rm -f "${i}.tgz"
+    done
+    OS_ARCHES=(linux-musl-amd64 linux-musl-arm64)
+    CGO_ARGS=(x86_64-linux-musl-gcc aarch64-linux-musl-gcc)
+    for i in "${!OS_ARCHES[@]}"; do
+      os_arch=${OS_ARCHES[$i]}
+      cgo_cc=${CGO_ARGS[$i]}
+      build_tags=$(GetBuildTagsForTarget "$os_arch")
+      export GOOS=${os_arch%%-*}
+      export GOARCH=${os_arch##*-}
+      export CC=${cgo_cc}
+      export CGO_ENABLED=1
+      go build -o ./build/$appName-$os_arch -ldflags="$muslflags" -tags="$build_tags" .
+    done
+
+    # 构建 Windows arm64
+    BuildWinArm64 ./build/"$appName"-windows-arm64.exe
+
+    # 构建 Windows amd64
+    xgo -targets=windows/amd64 -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
+    mv "$appName"-* build
   else
     BuildRelease
     if [ "$useLite" = true ]; then
