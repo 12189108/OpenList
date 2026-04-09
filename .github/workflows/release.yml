@@ -14,41 +14,83 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build_and_release:
+  build:
+    strategy:
+      matrix:
+        target:
+          # 【精准控制】：这里只保留了你需要的 4 个平台，绝不会编译多余的东西！
+          - windows-amd64
+          - windows-arm64
+          - linux-amd64-musl
+          - linux-arm64-musl
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25.0"
 
-      - name: Install xgo
-        # xgo 用于交叉编译 Windows amd64
-        run: go install src.techknowlogick.com/xgo@latest
-
-      - name: Build All Targets
-        # 运行我们在 build.sh 中新增的 custom_release 分支
-        run: bash build.sh release custom_release
+      - name: Setup web
+        # 这一步仅拉取你指定的前端仓库文件
+        run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ github.event.inputs.version }}
           FRONTEND_REPO: "12189108/OpenList-Frontend"
+
+      - name: Build
+        uses: OpenListTeam/cgo-actions@v1.2.2
+        with:
+          targets: ${{ matrix.target }}
+          musl-target-format: $os-$musl-$arch
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          out-dir: build
+          # 增加 -trimpath 优化构建路径
+          flags: -trimpath -tags=jsoniter
+          x-flags: |
+            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
+            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+          # 加上平台后缀防止互相覆盖
+          output: openlist-${{ matrix.target }}$ext
+
+      - name: Compress Binaries (UPX)
+        # 【完美瘦身】：使用 UPX 进行压缩，自动去除调试信息，文件从 140MB 骤降至 30MB 左右
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx-ucl
+          upx -9 build/* || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openlist-binaries
+          name: openlist_${{ matrix.target }}
           path: build/*
+
+  release:
+    needs: build
+    name: Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build-assets
+          merge-multiple: true
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
           name: Release ${{ github.event.inputs.version }}
-          files: build/*
+          files: build-assets/*
           draft: false
           prerelease: false
         env:
