@@ -1,77 +1,65 @@
-name: Release builds
+name: Custom Release Build
 
 on:
-  release:
-    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '请输入发布版本号 (例如: v1.0.0)'
+        required: true
+        type: string
+        default: 'v1.0.0'
 
-permissions:
-  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Set release to prerelease first
-  prerelease:
-    name: Set Prerelease
-    runs-on: ubuntu-latest
-    steps:
-      - name: Prerelease
-        uses: irongut/EditRelease@v1.2.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          id: ${{ github.event.release.id }}
-          prerelease: true
-
-  # Main release job for all platforms
-  release:
-    needs: prerelease
+  build:
     strategy:
       matrix:
-        build-type: [ 'standard', 'lite' ]
-        target-platform: [ '', 'android', 'freebsd', 'linux_musl', 'linux_musl_arm' ]
-    name: Release ${{ matrix.target-platform && format('{0} ', matrix.target-platform) || '' }}${{ matrix.build-type == 'lite' && 'Lite' || '' }}
+        target:
+          - windows-amd64
+          - linux-arm64-musl
+          - linux-amd64-musl
+          - windows-arm64
+          - android-arm64
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Free Disk Space (Ubuntu)
-        if: matrix.target-platform == ''
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.0'
+          go-version: "1.25.0"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install dependencies
-        if: matrix.target-platform == ''
-        run: |
-          sudo snap install zig --classic --beta
-          docker pull crazymax/xgo:latest
-          go install github.com/crazy-max/xgo@latest
-          sudo apt install upx
-
-      - name: Build
-        run: |
-          bash build.sh release ${{ matrix.build-type == 'lite' && 'lite' || '' }} ${{ matrix.target-platform }}
+      - name: Setup web
+        run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+          FRONTEND_REPO: "12189108/OpenList-Frontend"
 
-      - name: Upload assets
-        uses: softprops/action-gh-release@v2
+      - name: Build
+        uses: OpenListTeam/cgo-actions@v1.2.2
         with:
-          files: build/compress/*
-          prerelease: false
-          tag_name: ${{ github.event.release.tag_name }}
+          targets: ${{ matrix.target }}
+          musl-target-format: $os-$musl-$arch
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          out-dir: build
+          x-flags: |
+            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
+            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
+            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+          output: openlist$ext
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlist_${{ github.event.inputs.version }}_${{ steps.short-sha.outputs.sha }}_${{ matrix.target }}
+          path: build/*
