@@ -27,8 +27,6 @@ type FsChunkInitReq struct {
 	TotalChunks  int    `json:"total_chunks" form:"total_chunks" binding:"required"`
 	LastModified int64  `json:"last_modified" form:"last_modified"`
 	Mimetype     string `json:"mimetype" form:"mimetype"`
-	MD5          string `json:"md5" form:"md5"`
-	SHA1         string `json:"sha1" form:"sha1"`
 	SHA256       string `json:"sha256" form:"sha256"`
 }
 
@@ -77,8 +75,6 @@ func FsChunkInit(c *gin.Context) {
 		Mimetype:     req.Mimetype,
 		LastModified: lastModifiedFromMillis(req.LastModified),
 		Hashes: map[string]string{
-			"md5":    req.MD5,
-			"sha1":   req.SHA1,
 			"sha256": req.SHA256,
 		},
 	})
@@ -135,8 +131,6 @@ func FsChunkUpload(c *gin.Context) {
 		chunkSize = session.ChunkSize
 	}
 	hashes := map[string]string{
-		"md5":    strings.TrimSpace(c.GetHeader("X-Chunk-Md5")),
-		"sha1":   strings.TrimSpace(c.GetHeader("X-Chunk-Sha1")),
 		"sha256": strings.TrimSpace(c.GetHeader("X-Chunk-Sha256")),
 	}
 	hashes = dropEmptyHashes(hashes)

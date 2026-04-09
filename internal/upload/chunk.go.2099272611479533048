@@ -25,16 +25,16 @@ import (
 )
 
 const (
-	DefaultSessionTTL                 = 24 * time.Hour
-	DefaultChunkUploadTimeout         = 15 * time.Minute
-	DefaultCompleteUploadLimit        = 2 * time.Hour
-	cleanupInterval                   = 10 * time.Minute
-	headerMagic                       = "OLCHNK01"
-	headerVersion              uint32 = 1
-	metaBlockSize                     = 32 * 1024
-	chunkStateBlockSize               = 1024
-	fileSuffix                        = ".upload"
-	preambleSize                      = 24
+	DefaultSessionTTL          = 24 * time.Hour
+	DefaultChunkUploadTimeout  = 15 * time.Minute
+	DefaultCompleteUploadLimit = 2 * time.Hour
+	cleanupInterval            = 10 * time.Minute
+	headerMagic                = "OLCHNK01"
+	headerVersion       uint32 = 1
+	metaBlockSize              = 32 * 1024
+	chunkStateBlockSize        = 1024
+	fileSuffix                 = ".upload"
+	preambleSize               = 24
 )
 
 type Session struct {
