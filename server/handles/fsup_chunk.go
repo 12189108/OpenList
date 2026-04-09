@@ -188,17 +188,22 @@ func FsChunkComplete(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	defer reader.Close()
-	file := upload.BuildStream(session, &ctxReader{ctx: ctx, reader: reader})
+	streamReader := io.ReadCloser(reader)
+	if !req.AsTask {
+		streamReader = &ctxReader{ctx: ctx, reader: reader}
+	}
+	file := upload.BuildStream(session, streamReader)
+	file.WebPutAsTask = req.AsTask
 	dir := stdpath.Dir(session.Path)
 	if req.AsTask {
-		taskInfo, err := fs.PutAsTask(ctx, dir, file)
+		taskCtx := context.WithoutCancel(c.Request.Context())
+		taskInfo, err := fs.PutAsTask(taskCtx, dir, file)
 		if err != nil {
-			_ = upload.ChunkUpload.RemoveSessionByID(user.ID, session.ID)
+			_ = upload.ChunkUpload.RemoveSession(user, session.ID)
 			common.ErrorResp(c, err, 500)
 			return
 		}
-		if err := upload.ChunkUpload.RemoveSessionByID(user.ID, session.ID); err != nil {
+		if err := upload.ChunkUpload.RemoveSession(user, session.ID); err != nil {
 			common.ErrorResp(c, err, 500)
 			return
 		}
@@ -212,11 +217,11 @@ func FsChunkComplete(c *gin.Context) {
 		return
 	}
 	if err := fs.PutDirectly(ctx, dir, file); err != nil {
-		_ = upload.ChunkUpload.RemoveSessionByID(user.ID, session.ID)
+		_ = upload.ChunkUpload.RemoveSession(user, session.ID)
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	if err := upload.ChunkUpload.RemoveSessionByID(user.ID, session.ID); err != nil {
+	if err := upload.ChunkUpload.RemoveSession(user, session.ID); err != nil {
 		common.ErrorResp(c, err, 500)
 		return
 	}

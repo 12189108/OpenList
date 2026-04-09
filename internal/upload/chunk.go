@@ -11,6 +11,7 @@ import (
 	"os"
 	stdpath "path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -127,6 +128,8 @@ func (w *offsetWriter) Write(p []byte) (int, error) {
 
 var ChunkUpload = &Manager{}
 
+var invalidUserDirChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+
 func (m *Manager) InitSession(args InitArgs) (*Session, error) {
 	if args.User == nil {
 		return nil, fmt.Errorf("missing user")
@@ -175,7 +178,7 @@ func (m *Manager) InitSession(args InitArgs) (*Session, error) {
 	lock := m.lock(session.ID)
 	lock.Lock()
 	defer lock.Unlock()
-	filePath := m.filePath(session.UserID, session.ID)
+	filePath := m.filePath(args.User, session.ID)
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		return nil, err
 	}
@@ -204,7 +207,7 @@ func (m *Manager) GetSession(user *model.User, sessionID string) (*Session, erro
 	lock := m.lock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	return m.loadSessionByUserID(user.ID, sessionID)
+	return m.loadSessionByUser(user, sessionID)
 }
 
 func (m *Manager) UploadChunk(args UploadChunkArgs) (*Session, *ChunkRecord, error) {
@@ -220,7 +223,7 @@ func (m *Manager) UploadChunk(args UploadChunkArgs) (*Session, *ChunkRecord, err
 	lock := m.lock(args.SessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := m.loadSessionByUserID(args.User.ID, args.SessionID)
+	session, err := m.loadSessionByUser(args.User, args.SessionID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,7 +280,7 @@ func (m *Manager) CompleteReader(user *model.User, sessionID string) (*Session, 
 	lock := m.lock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := m.loadSessionByUserID(user.ID, sessionID)
+	session, err := m.loadSessionByUser(user, sessionID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -310,7 +313,7 @@ func (m *Manager) RemoveSession(user *model.User, sessionID string) error {
 	lock := m.lock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := m.loadSessionByUserID(user.ID, sessionID)
+	session, err := m.loadSessionByUser(user, sessionID)
 	if err != nil {
 		return err
 	}
@@ -324,7 +327,7 @@ func (m *Manager) RemoveSessionByID(userID uint, sessionID string) error {
 	lock := m.lock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	session, err := m.loadSessionByUserID(userID, sessionID)
+	session, err := m.findSessionByID(userID, sessionID)
 	if err != nil {
 		return err
 	}
@@ -382,8 +385,23 @@ func (m *Manager) cleanupExpired() error {
 	return nil
 }
 
-func (m *Manager) loadSessionByUserID(userID uint, sessionID string) (*Session, error) {
-	session, err := loadSessionFile(m.filePath(userID, sessionID))
+func (m *Manager) loadSessionByUser(user *model.User, sessionID string) (*Session, error) {
+	if user == nil {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	session, err := loadSessionFile(m.filePath(user, sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	if session.UserID != user.ID {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	return session, nil
+}
+
+func (m *Manager) loadSessionByUserID(userID uint, username string, sessionID string) (*Session, error) {
+	tempUser := &model.User{ID: userID, Username: username}
+	session, err := loadSessionFile(m.filePath(tempUser, sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("upload session not found")
 	}
@@ -391,6 +409,26 @@ func (m *Manager) loadSessionByUserID(userID uint, sessionID string) (*Session, 
 		return nil, fmt.Errorf("upload session not found")
 	}
 	return session, nil
+}
+
+func (m *Manager) findSessionByID(userID uint, sessionID string) (*Session, error) {
+	userDirs, err := os.ReadDir(m.root)
+	if err != nil {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	for _, userDir := range userDirs {
+		if !userDir.IsDir() {
+			continue
+		}
+		session, err := loadSessionFile(filepath.Join(m.root, userDir.Name(), sessionID+fileSuffix))
+		if err != nil {
+			continue
+		}
+		if session.UserID == userID {
+			return session, nil
+		}
+	}
+	return nil, fmt.Errorf("upload session not found")
 }
 
 func (m *Manager) removeSessionLocked(session *Session) error {
@@ -406,12 +444,18 @@ func (m *Manager) lock(sessionID string) *sync.Mutex {
 	return value.(*sync.Mutex)
 }
 
-func (m *Manager) userDir(userID uint) string {
-	return filepath.Join(m.root, fmt.Sprintf("user-%d", userID))
+func (m *Manager) userDir(user *model.User) string {
+	name := "user-" + strconv.FormatUint(uint64(user.ID), 10)
+	if user != nil {
+		if sanitized := sanitizeUserDirName(user.Username); sanitized != "" {
+			name = sanitized
+		}
+	}
+	return filepath.Join(m.root, name)
 }
 
-func (m *Manager) filePath(userID uint, sessionID string) string {
-	return filepath.Join(m.userDir(userID), sessionID+fileSuffix)
+func (m *Manager) filePath(user *model.User, sessionID string) string {
+	return filepath.Join(m.userDir(user), sessionID+fileSuffix)
 }
 
 func chunkRootDir() string {
@@ -691,4 +735,14 @@ func ParseChunkIndex(value string) (int, error) {
 		return 0, fmt.Errorf("invalid chunk index")
 	}
 	return index, nil
+}
+
+func sanitizeUserDirName(name string) string {
+	name = strings.TrimSpace(name)
+	name = invalidUserDirChars.ReplaceAllString(name, "_")
+	name = strings.TrimRight(name, ". ")
+	if name == "" {
+		return ""
+	}
+	return name
 }
