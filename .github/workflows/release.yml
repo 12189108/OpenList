@@ -18,7 +18,7 @@ jobs:
     strategy:
       matrix:
         target:
-          # 【精准控制】：这里只保留了你需要的 4 个平台，绝不会编译多余的东西！
+          # 只保留这4个你需要的平台
           - windows-amd64
           - windows-arm64
           - linux-amd64-musl
@@ -38,7 +38,7 @@ jobs:
           go-version: "1.25.0"
 
       - name: Setup web
-        # 这一步仅拉取你指定的前端仓库文件
+        # 你的前端
         run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,8 +51,7 @@ jobs:
           musl-target-format: $os-$musl-$arch
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
-          # 增加 -trimpath 优化构建路径
-          flags: -trimpath -tags=jsoniter
+          # 删除了导致报错的 flags 参数，完全恢复原版的默认行为！
           x-flags: |
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
@@ -63,7 +62,7 @@ jobs:
           output: openlist-${{ matrix.target }}$ext
 
       - name: Compress Binaries (UPX)
-        # 【完美瘦身】：使用 UPX 进行压缩，自动去除调试信息，文件从 140MB 骤降至 30MB 左右
+        # 用 UPX 压缩文件，自动剥离符号，大大减小体积 (遇到不支持的架构如某些arm会跳过报错)
         run: |
           sudo apt-get update && sudo apt-get install -y upx-ucl
           upx -9 build/* || true
