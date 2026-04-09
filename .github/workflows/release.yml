@@ -15,70 +15,84 @@ concurrency:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        target:
-          - windows-amd64
-          - windows-arm64
-          - linux-amd64-musl
-          - linux-arm64-musl
-    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - uses: benjlevesque/short-sha@v3.0
-        id: short-sha
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25.0"
 
-      - name: Setup web
-        run: bash build.sh release web
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_REPO: "12189108/OpenList-Frontend"
-
-      - name: Build
-        uses: OpenListTeam/cgo-actions@v1.2.2
-        with:
-          targets: ${{ matrix.target }}
-          musl-target-format: $os-$musl-$arch
-          # 开启静态链接，修复 Linux 下 "required file not found" 错误
-          static-link-for-musl: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          out-dir: build
-          # 删除了引发 Bug 的 flags 参数，保持最原始的纯净配置！
-          x-flags: |
-            github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
-            github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ github.event.inputs.version }}
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
-          # 加上目标后缀，防止生成的文件同名互相覆盖
-          output: openlist-${{ matrix.target }}$ext
-
-      - name: Strip Debug Info and Compress
-        # 在这里执行系统级去调试信息，完美避开 Go 编译器的报错！
+      - name: Build All 4 Targets Natively (No Plugins, No Bugs)
         run: |
-          sudo apt-get update && sudo apt-get install -y binutils binutils-mingw-w64 upx-ucl
+          VERSION="${{ github.event.inputs.version }}"
+          export FRONTEND_REPO="12189108/OpenList-Frontend"
+          export GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           
-          # 剔除 Linux 程序的调试信息
-          strip build/openlist-linux-* || true
+          echo "==== 1. 获取专属前端 ===="
+          bash build.sh release web
+
+          echo "==== 2. 准备交叉编译工具链 (绕过报错的Snap) ===="
+          # 安装 Windows amd64 编译器
+          sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
           
-          # 剔除 Windows amd64 程序的调试信息
-          x86_64-w64-mingw32-strip build/openlist-windows-amd64* || true
+          # 下载 Linux Musl 编译器
+          BASE="https://github.com/OpenListTeam/musl-compilers/releases/latest/download/"
+          curl -fsSL -o x86_64.tgz "${BASE}x86_64-linux-musl-cross.tgz"
+          curl -fsSL -o aarch64.tgz "${BASE}aarch64-linux-musl-cross.tgz"
+          sudo tar xf x86_64.tgz --strip-components 1 -C /usr/local
+          sudo tar xf aarch64.tgz --strip-components 1 -C /usr/local
+
+          # 下载 Zig (用于 Windows arm64)
+          wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
+          tar -xf zig-linux-x86_64-0.11.0.tar.xz
+          export PATH="$PWD/zig-linux-x86_64-0.11.0:$PATH"
+
+          echo "==== 3. 配置原生参数 (包含 -s -w 完美瘦身) ===="
+          mkdir -p build
+          BUILT_AT="$(date +'%F %T %z')"
+          GIT_AUTHOR="The OpenList Projects Contributors <noreply@openlist.team>"
+          GIT_COMMIT=$(git log --pretty=format:"%h" -1 || echo "unknown")
           
-          # 进一步极限压缩，体积立减
-          upx -9 build/* || true
+          # 注意：这里的 -s -w 会在编译时原生且安全地去除调试信息，绝不破坏程序！
+          LDFLAGS="-s -w \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' \
+          -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'"
+
+          export CGO_ENABLED=1
+
+          echo "==== 4. 开始精准编译 4 个目标 ===="
+
+          # 目标 1: Linux amd64 musl (纯静态，放到任何Linux直接跑)
+          echo "Building linux-amd64-musl..."
+          CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOOS=linux GOARCH=amd64 \
+          go build -o build/openlist-linux-amd64-musl -ldflags="--extldflags '-static -fpic' $LDFLAGS" -tags=jsoniter .
+
+          # 目标 2: Linux arm64 musl
+          echo "Building linux-arm64-musl..."
+          CC=aarch64-linux-musl-gcc CXX=aarch64-linux-musl-g++ GOOS=linux GOARCH=arm64 \
+          go build -o build/openlist-linux-arm64-musl -ldflags="--extldflags '-static -fpic' $LDFLAGS" -tags=jsoniter .
+
+          # 目标 3: Windows amd64
+          echo "Building windows-amd64..."
+          CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ GOOS=windows GOARCH=amd64 \
+          go build -o build/openlist-windows-amd64.exe -ldflags="$LDFLAGS" -tags=jsoniter .
+
+          # 目标 4: Windows arm64
+          echo "Building windows-arm64..."
+          chmod +x ./wrapper/zcc-arm64 ./wrapper/zcxx-arm64
+          CC=$(pwd)/wrapper/zcc-arm64 CXX=$(pwd)/wrapper/zcxx-arm64 GOOS=windows GOARCH=arm64 \
+          go build -o build/openlist-windows-arm64.exe -ldflags="$LDFLAGS" -tags=jsoniter .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openlist_${{ matrix.target }}
+          name: openlist-binaries
           path: build/*
 
   release:
