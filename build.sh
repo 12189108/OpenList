@@ -234,7 +234,7 @@ BuildRelease() {
   rm -rf .git/
   mkdir -p "build"
   BuildWinArm64 ./build/"$appName"-windows-arm64.exe
-  BuildWin7 ./build/"$appName"-windows7
+  # BuildWin7 ./build/"$appName"-windows7
   xgo -out "$appName" -ldflags="$ldflags" -tags=jsoniter .
   # why? Because some target platforms seem to have issues with upx compression
   # upx -9 ./"$appName"-linux-amd64
