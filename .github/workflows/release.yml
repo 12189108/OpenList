@@ -49,8 +49,6 @@ jobs:
           musl-target-format: $os-$musl-$arch
           github-token: ${{ secrets.GITHUB_TOKEN }}
           out-dir: build
-          # 使用 flags 输入传递去掉调试信息的 -ldflags "-s -w" 参数
-          flags: -ldflags "-s -w"
           x-flags: |
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@openlist.team>
