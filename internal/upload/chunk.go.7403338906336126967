@@ -1,0 +1,693 @@
+package upload
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	stdpath "path"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils/random"
+)
+
+const (
+	DefaultSessionTTL          = 24 * time.Hour
+	DefaultChunkUploadTimeout  = 15 * time.Minute
+	DefaultCompleteUploadLimit = 2 * time.Hour
+	cleanupInterval            = 10 * time.Minute
+	sessionFileName            = "session.json"
+	partsDirName               = "parts"
+)
+
+type Session struct {
+	ID           string               `json:"id"`
+	UserID       uint                 `json:"user_id"`
+	Username     string               `json:"username"`
+	Path         string               `json:"path"`
+	Name         string               `json:"name"`
+	Size         int64                `json:"size"`
+	ChunkSize    int64                `json:"chunk_size"`
+	TotalChunks  int                  `json:"total_chunks"`
+	Mimetype     string               `json:"mimetype"`
+	LastModified int64                `json:"last_modified"`
+	CreatedAt    int64                `json:"created_at"`
+	UpdatedAt    int64                `json:"updated_at"`
+	ExpiresAt    int64                `json:"expires_at"`
+	Hashes       map[string]string    `json:"hashes"`
+	Chunks       map[int]*ChunkRecord `json:"chunks"`
+}
+
+type ChunkRecord struct {
+	Index      int               `json:"index"`
+	Size       int64             `json:"size"`
+	Hashes     map[string]string `json:"hashes"`
+	UploadedAt int64             `json:"uploaded_at"`
+}
+
+type InitArgs struct {
+	User         *model.User
+	Path         string
+	Size         int64
+	ChunkSize    int64
+	TotalChunks  int
+	Mimetype     string
+	LastModified time.Time
+	Hashes       map[string]string
+}
+
+type UploadChunkArgs struct {
+	User      *model.User
+	SessionID string
+	Index     int
+	Size      int64
+	Hashes    map[string]string
+	Reader    io.Reader
+}
+
+type Manager struct {
+	root string
+	once sync.Once
+	mu   sync.Map
+}
+
+var ChunkUpload = &Manager{}
+
+func (m *Manager) InitSession(args InitArgs) (*Session, error) {
+	if args.User == nil {
+		return nil, fmt.Errorf("missing user")
+	}
+	if args.Path == "" {
+		return nil, fmt.Errorf("missing path")
+	}
+	if args.Size <= 0 {
+		return nil, fmt.Errorf("invalid file size")
+	}
+	if args.ChunkSize <= 0 {
+		return nil, fmt.Errorf("invalid chunk size")
+	}
+	if args.TotalChunks <= 0 {
+		return nil, fmt.Errorf("invalid total chunks")
+	}
+	if got := calcTotalChunks(args.Size, args.ChunkSize); got != args.TotalChunks {
+		return nil, fmt.Errorf("total chunks mismatch: expect %d", got)
+	}
+	hashes := normalizeHashes(args.Hashes)
+	if len(hashes) == 0 {
+		return nil, fmt.Errorf("at least one file hash is required")
+	}
+	now := time.Now()
+	session := &Session{
+		ID:           random.String(32),
+		UserID:       args.User.ID,
+		Username:     args.User.Username,
+		Path:         filepath.ToSlash(args.Path),
+		Name:         stdpath.Base(filepath.ToSlash(args.Path)),
+		Size:         args.Size,
+		ChunkSize:    args.ChunkSize,
+		TotalChunks:  args.TotalChunks,
+		Mimetype:     args.Mimetype,
+		LastModified: args.LastModified.UnixMilli(),
+		CreatedAt:    now.UnixMilli(),
+		UpdatedAt:    now.UnixMilli(),
+		ExpiresAt:    now.Add(DefaultSessionTTL).UnixMilli(),
+		Hashes:       hashes,
+		Chunks:       map[int]*ChunkRecord{},
+	}
+	if err := m.ensureReady(); err != nil {
+		return nil, err
+	}
+	lock := m.lock(session.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := os.MkdirAll(m.partsDir(session), 0o700); err != nil {
+		return nil, err
+	}
+	if err := m.saveSession(session); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+func (m *Manager) GetSession(user *model.User, sessionID string) (*Session, error) {
+	if user == nil {
+		return nil, fmt.Errorf("missing user")
+	}
+	if sessionID == "" {
+		return nil, fmt.Errorf("missing upload id")
+	}
+	if err := m.ensureReady(); err != nil {
+		return nil, err
+	}
+	lock := m.lock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	return m.loadSession(user, sessionID)
+}
+
+func (m *Manager) UploadChunk(args UploadChunkArgs) (*Session, *ChunkRecord, error) {
+	if args.User == nil {
+		return nil, nil, fmt.Errorf("missing user")
+	}
+	if args.Reader == nil {
+		return nil, nil, fmt.Errorf("missing chunk reader")
+	}
+	if err := m.ensureReady(); err != nil {
+		return nil, nil, err
+	}
+	lock := m.lock(args.SessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	session, err := m.loadSession(args.User, args.SessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if isExpired(session) {
+		_ = m.removeSessionLocked(session)
+		return nil, nil, fmt.Errorf("upload session expired")
+	}
+	if args.Index < 0 || args.Index >= session.TotalChunks {
+		return nil, nil, fmt.Errorf("invalid chunk index")
+	}
+	expectedSize := chunkExpectedSize(session, args.Index)
+	if args.Size <= 0 {
+		args.Size = expectedSize
+	}
+	if args.Size != expectedSize {
+		return nil, nil, fmt.Errorf("chunk size mismatch: expect %d", expectedSize)
+	}
+	tmpPath := m.chunkPath(session, args.Index) + ".tmp"
+	partFile, err := os.Create(tmpPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		_ = partFile.Close()
+	}()
+	hashTypes, err := hashTypesFromMap(args.Hashes)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, nil, err
+	}
+	var writer io.Writer = partFile
+	var hasher *utils.MultiHasher
+	if len(hashTypes) > 0 {
+		hasher = utils.NewMultiHasher(hashTypes)
+		writer = io.MultiWriter(partFile, hasher)
+	}
+	written, err := utils.CopyWithBuffer(writer, io.LimitReader(args.Reader, expectedSize+1))
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, nil, err
+	}
+	if written != expectedSize {
+		_ = os.Remove(tmpPath)
+		return nil, nil, fmt.Errorf("chunk size mismatch: expect %d, got %d", expectedSize, written)
+	}
+	if err := partFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, nil, err
+	}
+	actualHashes := normalizeHashes(args.Hashes)
+	if hasher != nil {
+		actualHashes = exportHashInfo(hasher.GetHashInfo())
+		if err := verifyHashes(actualHashes, args.Hashes); err != nil {
+			_ = os.Remove(tmpPath)
+			return nil, nil, err
+		}
+	}
+	dstPath := m.chunkPath(session, args.Index)
+	_ = os.Remove(dstPath)
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, nil, err
+	}
+	record := &ChunkRecord{
+		Index:      args.Index,
+		Size:       written,
+		Hashes:     actualHashes,
+		UploadedAt: time.Now().UnixMilli(),
+	}
+	session.Chunks[args.Index] = record
+	touchSession(session)
+	if err := m.saveSession(session); err != nil {
+		return nil, nil, err
+	}
+	return session, record, nil
+}
+
+func (m *Manager) CompleteReader(user *model.User, sessionID string) (*Session, io.ReadCloser, error) {
+	if err := m.ensureReady(); err != nil {
+		return nil, nil, err
+	}
+	lock := m.lock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	session, err := m.loadSession(user, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if isExpired(session) {
+		_ = m.removeSessionLocked(session)
+		return nil, nil, fmt.Errorf("upload session expired")
+	}
+	for i := 0; i < session.TotalChunks; i++ {
+		record, ok := session.Chunks[i]
+		if !ok {
+			return nil, nil, fmt.Errorf("chunk %d not uploaded", i)
+		}
+		if record.Size != chunkExpectedSize(session, i) {
+			return nil, nil, fmt.Errorf("chunk %d size invalid", i)
+		}
+	}
+	touchSession(session)
+	if err := m.saveSession(session); err != nil {
+		return nil, nil, err
+	}
+	reader, err := newChunkSequenceReader(m, session)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session, reader, nil
+}
+
+func (m *Manager) RemoveSession(user *model.User, sessionID string) error {
+	if err := m.ensureReady(); err != nil {
+		return err
+	}
+	lock := m.lock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	session, err := m.loadSession(user, sessionID)
+	if err != nil {
+		return err
+	}
+	return m.removeSessionLocked(session)
+}
+
+func (m *Manager) RemoveSessionByID(userID uint, sessionID string) error {
+	if err := m.ensureReady(); err != nil {
+		return err
+	}
+	lock := m.lock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	session, err := m.loadSessionByUserID(userID, sessionID)
+	if err != nil {
+		return err
+	}
+	return m.removeSessionLocked(session)
+}
+
+func (m *Manager) ensureReady() error {
+	var err error
+	m.once.Do(func() {
+		m.root = filepath.Join(conf.Conf.TempDir, "chunk_uploads")
+		err = os.MkdirAll(m.root, 0o700)
+		if err == nil {
+			go m.cleanupLoop()
+		}
+	})
+	return err
+}
+
+func (m *Manager) cleanupLoop() {
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		_ = m.cleanupExpired()
+	}
+}
+
+func (m *Manager) cleanupExpired() error {
+	users, err := os.ReadDir(m.root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, userDir := range users {
+		if !userDir.IsDir() {
+			continue
+		}
+		userPath := filepath.Join(m.root, userDir.Name())
+		sessions, err := os.ReadDir(userPath)
+		if err != nil {
+			continue
+		}
+		for _, sessionDir := range sessions {
+			if !sessionDir.IsDir() {
+				continue
+			}
+			sessionPath := filepath.Join(userPath, sessionDir.Name())
+			session, err := readSessionFile(filepath.Join(sessionPath, sessionFileName))
+			if err != nil || isExpired(session) {
+				_ = os.RemoveAll(sessionPath)
+				m.mu.Delete(sessionDir.Name())
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) saveSession(session *Session) error {
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(m.sessionDir(session), sessionFileName), data, 0o600)
+}
+
+func (m *Manager) loadSession(user *model.User, sessionID string) (*Session, error) {
+	session, err := m.loadSessionByUserID(user.ID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Username != user.Username {
+		session.Username = user.Username
+	}
+	return session, nil
+}
+
+func (m *Manager) loadSessionByUserID(userID uint, sessionID string) (*Session, error) {
+	sessionPath, err := m.locateSessionPath(userID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	session, err := readSessionFile(filepath.Join(sessionPath, sessionFileName))
+	if err != nil {
+		return nil, err
+	}
+	if session.UserID != userID {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	if session.Chunks == nil {
+		session.Chunks = map[int]*ChunkRecord{}
+	}
+	return session, nil
+}
+
+func (m *Manager) locateSessionPath(userID uint, sessionID string) (string, error) {
+	sessionPath := filepath.Join(m.userDir(userID, ""), sessionID)
+	if _, err := os.Stat(sessionPath); err != nil {
+		return "", fmt.Errorf("upload session not found")
+	}
+	return sessionPath, nil
+}
+
+func (m *Manager) removeSessionLocked(session *Session) error {
+	m.mu.Delete(session.ID)
+	return os.RemoveAll(m.sessionDir(session))
+}
+
+func (m *Manager) lock(sessionID string) *sync.Mutex {
+	value, _ := m.mu.LoadOrStore(sessionID, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func (m *Manager) sessionDir(session *Session) string {
+	return filepath.Join(m.userDir(session.UserID, session.Username), session.ID)
+}
+
+func (m *Manager) userDir(userID uint, _ string) string {
+	return filepath.Join(m.root, fmt.Sprintf("user-%d", userID))
+}
+
+func (m *Manager) partsDir(session *Session) string {
+	return filepath.Join(m.sessionDir(session), partsDirName)
+}
+
+func (m *Manager) chunkPath(session *Session, index int) string {
+	return filepath.Join(m.partsDir(session), fmt.Sprintf("%08d.part", index))
+}
+
+type chunkSequenceReader struct {
+	manager        *Manager
+	session        *Session
+	currentIndex   int
+	currentFile    *os.File
+	hasher         *utils.MultiHasher
+	expectedHashes map[string]string
+	readBytes      int64
+}
+
+func newChunkSequenceReader(manager *Manager, session *Session) (*chunkSequenceReader, error) {
+	hashTypes, err := hashTypesFromMap(session.Hashes)
+	if err != nil {
+		return nil, err
+	}
+	return &chunkSequenceReader{
+		manager:        manager,
+		session:        session,
+		hasher:         utils.NewMultiHasher(hashTypes),
+		expectedHashes: normalizeHashes(session.Hashes),
+	}, nil
+}
+
+func (r *chunkSequenceReader) Read(p []byte) (int, error) {
+	for {
+		if r.currentFile == nil {
+			if r.currentIndex >= r.session.TotalChunks {
+				if r.readBytes != r.session.Size {
+					return 0, fmt.Errorf("file size mismatch: expect %d, got %d", r.session.Size, r.readBytes)
+				}
+				actualHashes := exportHashInfo(r.hasher.GetHashInfo())
+				if err := verifyHashes(actualHashes, r.expectedHashes); err != nil {
+					return 0, err
+				}
+				return 0, io.EOF
+			}
+			file, err := os.Open(r.manager.chunkPath(r.session, r.currentIndex))
+			if err != nil {
+				return 0, err
+			}
+			r.currentFile = file
+		}
+		n, err := r.currentFile.Read(p)
+		if n > 0 {
+			r.readBytes += int64(n)
+			_, _ = r.hasher.Write(p[:n])
+			return n, nil
+		}
+		closeErr := r.currentFile.Close()
+		r.currentFile = nil
+		r.currentIndex++
+		if err == io.EOF {
+			if closeErr != nil {
+				return 0, closeErr
+			}
+			continue
+		}
+		if closeErr != nil {
+			return 0, closeErr
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (r *chunkSequenceReader) Close() error {
+	if r.currentFile != nil {
+		err := r.currentFile.Close()
+		r.currentFile = nil
+		return err
+	}
+	return nil
+}
+
+func calcTotalChunks(size, chunkSize int64) int {
+	return int((size + chunkSize - 1) / chunkSize)
+}
+
+func chunkExpectedSize(session *Session, index int) int64 {
+	if index == session.TotalChunks-1 {
+		return session.Size - int64(index)*session.ChunkSize
+	}
+	return session.ChunkSize
+}
+
+func touchSession(session *Session) {
+	now := time.Now()
+	session.UpdatedAt = now.UnixMilli()
+	session.ExpiresAt = now.Add(DefaultSessionTTL).UnixMilli()
+}
+
+func isExpired(session *Session) bool {
+	return session == nil || time.Now().UnixMilli() > session.ExpiresAt
+}
+
+func readSessionFile(path string) (*Session, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var session Session
+	if err := json.Unmarshal(data, &session); err != nil {
+		return nil, err
+	}
+	if session.Chunks == nil {
+		session.Chunks = map[int]*ChunkRecord{}
+	}
+	return &session, nil
+}
+
+func sanitizePathToken(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	if b.Len() == 0 {
+		return "user"
+	}
+	return b.String()
+}
+
+func normalizeHashes(h map[string]string) map[string]string {
+	if len(h) == 0 {
+		return map[string]string{}
+	}
+	keys := make([]string, 0, len(h))
+	for key := range h {
+		keys = append(keys, strings.ToLower(strings.TrimSpace(key)))
+	}
+	slices.Sort(keys)
+	dst := make(map[string]string, len(keys))
+	for _, key := range keys {
+		value := strings.ToLower(strings.TrimSpace(h[key]))
+		if value != "" {
+			dst[key] = value
+		}
+	}
+	return dst
+}
+
+func hashTypesFromMap(h map[string]string) ([]*utils.HashType, error) {
+	keys := make([]string, 0, len(h))
+	for key, value := range h {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		keys = append(keys, strings.ToLower(strings.TrimSpace(key)))
+	}
+	slices.Sort(keys)
+	hashTypes := make([]*utils.HashType, 0, len(keys))
+	for _, key := range keys {
+		hashType, ok := utils.GetHashByName(key)
+		if !ok {
+			return nil, fmt.Errorf("unsupported hash type: %s", key)
+		}
+		hashTypes = append(hashTypes, hashType)
+	}
+	return hashTypes, nil
+}
+
+func verifyHashes(actual map[string]string, expected map[string]string) error {
+	for name, want := range normalizeHashes(expected) {
+		got := strings.ToLower(strings.TrimSpace(actual[name]))
+		if got == "" {
+			return fmt.Errorf("missing hash: %s", name)
+		}
+		if got != want {
+			return fmt.Errorf("%s mismatch", name)
+		}
+	}
+	return nil
+}
+
+func exportHashInfo(hashInfo *utils.HashInfo) map[string]string {
+	if hashInfo == nil {
+		return map[string]string{}
+	}
+	hashes := map[string]string{}
+	for hashType, value := range hashInfo.All() {
+		hashes[hashType.Name] = value
+	}
+	return hashes
+}
+
+func BuildStream(session *Session, reader io.ReadCloser) *stream.FileStream {
+	hashes := map[*utils.HashType]string{}
+	for name, value := range session.Hashes {
+		if hashType, ok := utils.GetHashByName(name); ok {
+			hashes[hashType] = value
+		}
+	}
+	return &stream.FileStream{
+		Obj: &model.Object{
+			Name:     session.Name,
+			Size:     session.Size,
+			Modified: time.UnixMilli(session.LastModified),
+			HashInfo: utils.NewHashInfoByMap(hashes),
+		},
+		Reader:   reader,
+		Mimetype: session.Mimetype,
+		Closers:  utils.Closers{reader},
+	}
+}
+
+func UploadedIndexes(session *Session) []int {
+	if session == nil || len(session.Chunks) == 0 {
+		return []int{}
+	}
+	indexes := make([]int, 0, len(session.Chunks))
+	for index := range session.Chunks {
+		indexes = append(indexes, index)
+	}
+	slices.Sort(indexes)
+	return indexes
+}
+
+func RemainingIndexes(session *Session) []int {
+	if session == nil {
+		return []int{}
+	}
+	remaining := make([]int, 0)
+	for i := 0; i < session.TotalChunks; i++ {
+		if _, ok := session.Chunks[i]; !ok {
+			remaining = append(remaining, i)
+		}
+	}
+	return remaining
+}
+
+func ParseHashes(values map[string][]string, prefix string) map[string]string {
+	hashes := map[string]string{}
+	for _, name := range []string{"md5", "sha1", "sha256"} {
+		key := prefix + name
+		if value := strings.TrimSpace(firstValue(values[key])); value != "" {
+			hashes[name] = value
+		}
+	}
+	return hashes
+}
+
+func firstValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func ParseChunkIndex(value string) (int, error) {
+	index, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("invalid chunk index")
+	}
+	return index, nil
+}
