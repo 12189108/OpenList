@@ -1,4 +1,4 @@
-name: Custom Release Build
+name: Custom Release
 
 on:
   workflow_dispatch:
@@ -18,11 +18,11 @@ jobs:
     strategy:
       matrix:
         target:
+          # 只保留 Windows 和 Linux 编译，已移除 Mac 和 Android
           - windows-amd64
           - linux-arm64-musl
           - linux-amd64-musl
           - windows-arm64
-          - android-arm64
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +38,7 @@ jobs:
           go-version: "1.25.0"
 
       - name: Setup web
+        # 使用指定的前端仓库拉取 Web 文件
         run: bash build.sh release web
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,5 +62,27 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openlist_${{ github.event.inputs.version }}_${{ steps.short-sha.outputs.sha }}_${{ matrix.target }}
+          name: openlist_${{ matrix.target }}
           path: build/*
+
+  release:
+    needs: build
+    name: Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build-assets
+          merge-multiple: true
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Release ${{ github.event.inputs.version }}
+          files: build-assets/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
