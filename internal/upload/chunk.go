@@ -36,6 +36,7 @@ const (
 	chunkStateBlockSize               = 1024
 	fileSuffix                        = ".upload"
 	preambleSize                      = 24
+	DefaultChunkSize                  = 25 * 1024 * 1024
 )
 
 type Session struct {
@@ -140,9 +141,7 @@ func (m *Manager) InitSession(args InitArgs) (*Session, error) {
 	if args.Size <= 0 {
 		return nil, fmt.Errorf("invalid file size")
 	}
-	if args.ChunkSize <= 0 {
-		return nil, fmt.Errorf("invalid chunk size")
-	}
+	args.ChunkSize = DefaultChunkSize
 	if args.TotalChunks <= 0 {
 		return nil, fmt.Errorf("invalid total chunks")
 	}
