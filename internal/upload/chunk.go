@@ -155,6 +155,13 @@ func (m *Manager) InitSession(args InitArgs) (*Session, error) {
 	if err := m.ensureReady(); err != nil {
 		return nil, err
 	}
+	normalizedPath := filepath.ToSlash(args.Path)
+	sha256Hash := hashes["sha256"]
+	// Try to find existing session for resumable upload
+	existing, err := m.findSessionByPathAndHash(args.User, normalizedPath, sha256Hash)
+	if err == nil && existing != nil && !isExpired(existing) {
+		return existing, nil
+	}
 	now := time.Now()
 	session := &Session{
 		ID:           random.String(32),
@@ -408,6 +415,27 @@ func (m *Manager) loadSessionByUserID(userID uint, username string, sessionID st
 		return nil, fmt.Errorf("upload session not found")
 	}
 	return session, nil
+}
+
+func (m *Manager) findSessionByPathAndHash(user *model.User, path string, sha256Hash string) (*Session, error) {
+	userDir := m.userDir(user)
+	files, err := os.ReadDir(userDir)
+	if err != nil {
+		return nil, fmt.Errorf("upload session not found")
+	}
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), fileSuffix) {
+			continue
+		}
+		session, err := loadSessionFile(filepath.Join(userDir, f.Name()))
+		if err != nil {
+			continue
+		}
+		if session.Path == path && normalizeHashes(session.Hashes)["sha256"] == sha256Hash && !isExpired(session) {
+			return session, nil
+		}
+	}
+	return nil, fmt.Errorf("upload session not found")
 }
 
 func (m *Manager) findSessionByID(userID uint, sessionID string) (*Session, error) {
