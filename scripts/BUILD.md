@@ -2,6 +2,8 @@
 
 在 GitHub Actions 选择 **Custom Build → Run workflow**。工作流只安装依赖、编译和上传产物，不运行测试。
 
+两个仓库的所有工作流均只接受 `workflow_dispatch` 手动触发，push、PR、Issue 和定时任务不再自动启动。Issue／PR 管理工作流需手动填写对应编号。
+
 | 输入 | 用途 | 留空或默认值 |
 | --- | --- | --- |
 | `version` | 后端产物版本号，可带 `v` | 从 `OpenListTeam/OpenList` 获取最新正式版号 |
@@ -12,6 +14,8 @@
 | `publish` | 编译后同时发布 GitHub Release | 关闭，只上传 Actions Artifact |
 
 **自动获取的是版本号。后端始终编译 Run workflow 所选分支，源码模式的前端始终编译 `frontend_ref`，不会切回官方发行版源码。** 要编译合并后的前端，请先将前端合并分支推送到自己的仓库，再把 `frontend_ref` 设为该分支；合并进 main 后使用默认值即可。
+
+所有后端编译入口（包括原 `build.sh`、Beta 和 Docker 工作流）均使用显式版本号或 GitHub 最新正式 Release 的版本号。版本不从 git describe、commit 或当前分支名推导；GitCommit 仅是单独的构建元数据。相同源码可以指定不同版本号编译，不要求先创建版本提交或标签。
 
 产物包含 Linux/Windows 的 amd64、arm64 二进制及 `build-info.json`，记录版本、前后端提交和前端来源。开启发布时，若仓库已有同名标签，使用新的自定义版本号，例如 `v4.2.6-custom.1`。
 

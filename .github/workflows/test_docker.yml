@@ -2,12 +2,19 @@ name: Beta Release (Docker)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    inputs:
+      version:
+        description: "后端版本号；留空取官方最新正式版号"
+        type: string
+        required: false
+      frontend_version:
+        description: "前端发行标签；留空取自己的前端仓库最新正式版"
+        type: string
+        required: false
+      publish:
+        description: "推送 Beta 镜像到容器仓库"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -21,13 +28,32 @@ env:
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/ppc64le,linux/riscv64,linux/loong64' ### Temporarily disable Docker builds for linux/s390x architectures for unknown reasons.
-  IMAGE_PUSH: ${{ github.event_name == 'push' }}
+  IMAGE_PUSH: ${{ inputs.publish }}
   IMAGE_TAGS_BETA: |
-    type=ref,event=pr
-    type=raw,value=beta,enable={{is_default_branch}}
+    type=raw,value=beta
 
 jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      frontend_version: ${{ steps.versions.outputs.frontend_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Resolve release versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+        run: bash scripts/resolve-versions.sh
+
   build_binary:
+    needs: versions
+    env:
+      VERSION: ${{ needs.versions.outputs.version }}
+      FRONTEND_VERSION: ${{ needs.versions.outputs.frontend_version }}
     name: Build Binaries for Docker Release (Beta)
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +94,7 @@ jobs:
             !build/musl-libs/**
 
   release_docker:
-    needs: build_binary
+    needs: [versions, build_binary]
     name: Release Docker image (Beta)
     runs-on: ubuntu-latest
     permissions:
@@ -131,7 +157,9 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
             ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
-          tags: ${{ env.IMAGE_TAGS_BETA }}
+          tags: |
+            ${{ env.IMAGE_TAGS_BETA }}
+            type=raw,value=${{ needs.versions.outputs.version }}-beta
           flavor: |
             ${{ matrix.tag_favor }}
 

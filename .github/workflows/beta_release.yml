@@ -1,9 +1,16 @@
 name: Beta Release builds
 
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "后端版本号；留空取官方最新正式版号"
+        type: string
+        required: false
+      frontend_version:
+        description: "前端发行标签；留空取自己的前端仓库最新正式版"
+        type: string
+        required: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,11 +23,23 @@ jobs:
   changelog:
     name: Beta Release Changelog
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      frontend_version: ${{ steps.versions.outputs.frontend_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+
+      - name: Resolve release versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+        run: bash scripts/resolve-versions.sh
 
       - name: Create or update ref
         id: create-or-update-ref
@@ -106,6 +125,9 @@ jobs:
 
     name: Beta Release
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.changelog.outputs.version }}
+      FRONTEND_VERSION: ${{ needs.changelog.outputs.frontend_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -138,8 +160,8 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ env.VERSION }}
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${{ env.FRONTEND_VERSION }}
         env:
           GOFLAGS: ${{ matrix.goflags }}
 

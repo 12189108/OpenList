@@ -55,25 +55,15 @@ while (($#)); do
   esac
 done
 
-resolve_version() {
-  local value=$1 repo=$2
-  if [[ -z "$value" || "$value" == auto ]]; then
-    value=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
-  fi
-  value="v${value#v}"
-  [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
-    echo "Invalid version: $value" >&2; return 1;
-  }
-  printf '%s' "$value"
-}
-VERSION=$(resolve_version "$VERSION" "$VERSION_REPO")
+source "$ROOT/scripts/resolve-versions.sh"
+VERSION=$(resolve_release_version "$VERSION" "$VERSION_REPO")
 mkdir -p "$OUTPUT_DIR" "$ROOT/.build"
 STAGING=$(mktemp -d "$ROOT/.build/frontend-assets.XXXXXX")
 trap 'rm -rf -- "$STAGING"' EXIT
 
 case "$FRONTEND_MODE" in
   source)
-    FRONTEND_VERSION=$(resolve_version "$FRONTEND_VERSION" "$FRONTEND_VERSION_REPO")
+    FRONTEND_VERSION=$(resolve_release_version "$FRONTEND_VERSION" "$FRONTEND_VERSION_REPO")
     FRONTEND_SOURCE_DIR=${FRONTEND_SOURCE_DIR:-$STAGING/source}
     if [[ ! -d "$FRONTEND_SOURCE_DIR" ]]; then
       mkdir -p "$FRONTEND_SOURCE_DIR"
@@ -82,7 +72,7 @@ case "$FRONTEND_MODE" in
       git -C "$FRONTEND_SOURCE_DIR" fetch --depth=1 origin "$FRONTEND_REF"
       git -C "$FRONTEND_SOURCE_DIR" checkout --detach FETCH_HEAD
     fi
-    FRONTEND_COMMIT=$(git -C "$FRONTEND_SOURCE_DIR" rev-parse HEAD)
+    FRONTEND_COMMIT=$(git -C "$FRONTEND_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
     # Existing checkouts are used as-is, including local feature changes.
     (
       cd "$FRONTEND_SOURCE_DIR"
@@ -100,7 +90,7 @@ case "$FRONTEND_MODE" in
     )
     ;;
   release)
-    FRONTEND_VERSION=$(resolve_version "$FRONTEND_VERSION" "$FRONTEND_REPO")
+    FRONTEND_VERSION=$(resolve_release_version "$FRONTEND_VERSION" "$FRONTEND_REPO")
     FRONTEND_COMMIT="release:$FRONTEND_VERSION"
     gh release download "$FRONTEND_VERSION" --repo "$FRONTEND_REPO" \
       --pattern "openlist-frontend-dist-$FRONTEND_VERSION.tar.gz" --dir "$STAGING"
@@ -118,7 +108,7 @@ tar -xf "$STAGING/frontend.tar" -C "$ROOT/public/dist"
 [[ "$(cat public/dist/VERSION)" == "$FRONTEND_VERSION" ]] || { echo "Frontend VERSION does not match the selected version" >&2; exit 1; }
 
 BUILT_AT=$(date +'%F %T %z')
-GIT_COMMIT=$(git rev-parse HEAD)
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
 LDFLAGS="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$FRONTEND_VERSION'"
 echo "Compiling backend $VERSION with frontend $FRONTEND_REPO $FRONTEND_VERSION ($FRONTEND_MODE)"
 read -r -a selected_targets <<< "$TARGETS"

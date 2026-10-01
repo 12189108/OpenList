@@ -1,8 +1,12 @@
-name: Issue Auto Reply
+name: Manual Issue Reply
 
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "要处理的 Issue 编号"
+        required: true
+        type: number
 
 permissions:
   issues: write
@@ -15,9 +19,16 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
-            if (context.payload.issue.title.startsWith('[Announcements]')) return;
-            const titleNotEdited = /(请修改标题|Please modify the title)/i.test(context.payload.issue.title);
-            const issueBody = context.payload.issue.body || "";
+            const issueNumber = Number(context.payload.inputs.issue_number);
+            if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+              core.setFailed('Issue number must be a positive integer');
+              return;
+            }
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+            if (issue.pull_request) { core.setFailed('Please select an Issue, not a PR'); return; }
+            if (issue.title.startsWith('[Announcements]')) return;
+            const titleNotEdited = /(请修改标题|Please modify the title)/i.test(issue.title);
+            const issueBody = issue.body || "";
             const aiSection = issueBody.match(/^### (AI生成内容|AI Generated Content)\r?\n([\s\S]*?)(?=^### |$(?![\s\S]))/m);
             const aiOptionsPattern = aiSection?.[1] === 'AI生成内容'
               ? /^\s*- \[([ xX])\] 我使用了AI工具生成此内容\r?\n- \[([ xX])\] 我没有使用AI工具生成此内容\s*$/
@@ -57,19 +68,19 @@ jobs:
 
             await github.rest.issues.createComment({
               ...context.repo,
-              issue_number: context.issue.number,
+              issue_number: issueNumber,
               body: comment
             });
             if (closeIssue) {
               await github.rest.issues.update({
                 ...context.repo,
-                issue_number: context.issue.number,
+                issue_number: issueNumber,
                 state: 'closed',
                 state_reason: 'not_planned',
                 labels: ['invalid']
               });
               await github.rest.issues.lock({
                 ...context.repo,
-                issue_number: context.issue.number
+                issue_number: issueNumber
               });
             }

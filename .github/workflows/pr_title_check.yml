@@ -1,8 +1,12 @@
-name: PR Title Check
+name: Manual PR Title Check
 
 on:
-  pull_request_target:
-    types: [opened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "要处理的 PR 编号"
+        required: true
+        type: number
 
 permissions:
   pull-requests: write
@@ -15,7 +19,13 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
-            const title = context.payload.pull_request.title;
+            const prNumber = Number(context.payload.inputs.pr_number);
+            if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+              core.setFailed('PR number must be a positive integer');
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: prNumber });
+            const title = pr.title;
             if (/^(feat|docs|fix|style|refactor|chore)\(.+?\)!?: /i.test(title)) return;
             const comment = `⚠️ PR 标题需以 \`feat(): \`, \`docs(): \`, \`fix(): \`, \`style(): \`, \`refactor(): \`, \`chore(): \` 其中之一开头，例如：\`feat(component): 新增功能\`。
             ⚠️ The PR title must start with \`feat(): \`, \`docs(): \`, \`fix(): \`, \`style(): \`, or \`refactor(): \`, \`chore(): \`. For example: \`feat(component): add new feature\`.
@@ -29,6 +39,6 @@ jobs:
             `;
             await github.rest.issues.createComment({
               ...context.repo,
-              issue_number: context.issue.number,
+              issue_number: prNumber,
               body: comment
             });

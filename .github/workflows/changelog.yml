@@ -1,9 +1,12 @@
-name: Release Automatic changelog
+name: Manual Release Changelog
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "需要生成日志的已发布标签；留空取本仓库最新正式 Release"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -13,10 +16,24 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ -z "$TAG" || "$TAG" == auto ]]; then
+            TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          fi
+          TAG="v${TAG#v}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: ${{ steps.release.outputs.tag }}
 
       - name: Delete beta tag
         run: git tag -d beta
@@ -25,3 +42,6 @@ jobs:
       - run: npx changelogithub # or changelogithub@0.12 if ensure the stable result
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          GITHUB_REF: refs/tags/${{ steps.release.outputs.tag }}
+          GITHUB_REF_NAME: ${{ steps.release.outputs.tag }}
+          GITHUB_REF_TYPE: tag

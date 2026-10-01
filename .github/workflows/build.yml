@@ -1,9 +1,16 @@
 name: Test Build
 
 on:
-  pull_request:
-    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "后端版本号；留空取官方最新正式版号"
+        type: string
+        required: false
+      frontend_version:
+        description: "前端发行标签；留空取自己的前端仓库最新正式版"
+        type: string
+        required: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -27,8 +34,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: benjlevesque/short-sha@dbe07338b37c456ce06d23409b35a56a7815eef4 # v4.0
-        id: short-sha
+      - name: Resolve release versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+        run: bash scripts/resolve-versions.sh
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -54,8 +67,8 @@ jobs:
             github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$built_at
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>
             github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$git_commit
-            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$tag
-            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling
+            github.com/OpenListTeam/OpenList/v4/internal/conf.Version=${{ env.VERSION }}
+            github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=${{ env.FRONTEND_VERSION }}
           output: openlist$ext
 
       - name: Verify musl binary is static
@@ -71,5 +84,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: openlist_${{ steps.short-sha.outputs.sha }}_${{ matrix.target }}
+          name: openlist_${{ env.VERSION }}_${{ matrix.target }}
           path: build/*

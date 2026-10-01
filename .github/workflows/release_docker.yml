@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       manual_tag:
-        description: 'Tag name (like v0.1.0). Required if as_latest is true.'
+        description: '后端/镜像版本号；留空取官方最新正式版号，不使用当前分支或 commit'
+        required: false
+        type: string
+      frontend_version:
+        description: '前端发行标签；留空取自己的前端仓库最新正式版'
         required: false
         type: string
       as_latest:
@@ -15,9 +19,6 @@ on:
         options:
           - 'true'
           - 'false'
-  push:
-    tags:
-      - 'v*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,13 +33,33 @@ env:
   ARTIFACT_NAME: 'binaries_docker_release'
   ARTIFACT_NAME_LITE: 'binaries_docker_release_lite'
   RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/ppc64le,linux/riscv64,linux/loong64' ### Temporarily disable Docker builds for linux/s390x architectures for unknown reasons.
-  IMAGE_PUSH: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+  IMAGE_PUSH: 'true'
 
 permissions:
   packages: write
 
 jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      frontend_version: ${{ steps.versions.outputs.frontend_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Resolve release versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.manual_tag }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
+        run: bash scripts/resolve-versions.sh
+
   build_binary:
+    needs: versions
+    env:
+      VERSION: ${{ needs.versions.outputs.version }}
+      FRONTEND_VERSION: ${{ needs.versions.outputs.frontend_version }}
     name: Build Binaries for Docker Release
     runs-on: ubuntu-latest
     steps:
@@ -79,6 +100,10 @@ jobs:
             !build/musl-libs/**
 
   build_binary_lite:
+    needs: versions
+    env:
+      VERSION: ${{ needs.versions.outputs.version }}
+      FRONTEND_VERSION: ${{ needs.versions.outputs.frontend_version }}
     name: Build Binaries for Docker Release (Lite)
     runs-on: ubuntu-latest
     steps:
@@ -119,7 +144,7 @@ jobs:
             !build/musl-libs/**
 
   release_docker:
-    needs: build_binary
+    needs: [versions, build_binary]
     name: Release Docker image
     runs-on: ubuntu-latest
     strategy:
@@ -180,12 +205,9 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
             ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
-          tags: >
-            ${{ github.event_name == 'workflow_dispatch'
-                && format('type=raw,value={0}', github.event.inputs.manual_tag)
-              || format('type=raw,value={0}', github.ref_name) }}
+          tags: type=raw,value=${{ needs.versions.outputs.version }}
           flavor: |
-            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
+            latest=${{ inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push
@@ -203,7 +225,7 @@ jobs:
           platforms: ${{ env.RELEASE_PLATFORMS }}
 
   release_docker_lite:
-    needs: build_binary_lite
+    needs: [versions, build_binary_lite]
     name: Release Docker image (Lite)
     runs-on: ubuntu-latest
     strategy:
@@ -264,12 +286,9 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
             ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
-          tags: >
-            ${{ github.event_name == 'workflow_dispatch'
-                && format('type=raw,value={0}', github.event.inputs.manual_tag)
-              || format('type=raw,value={0}', github.ref_name) }}
+          tags: type=raw,value=${{ needs.versions.outputs.version }}
           flavor: |
-            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
+            latest=${{ inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push

@@ -2,9 +2,9 @@ set -e
 appName="openlist"
 builtAt="$(date +'%F %T %z')"
 gitAuthor="The OpenList Projects Contributors <noreply@oplist.org>"
-gitCommit=$(git log --pretty=format:"%h" -1)
+gitCommit=$(git log --pretty=format:"%h" -1 2>/dev/null || echo "unknown")
 
-# Set frontend repository, default to OpenListTeam/OpenList-Frontend
+# Set frontend repository, default to the custom fork.
 frontendRepo="${FRONTEND_REPO:-12189108/OpenList-Frontend}"
 
 githubAuthArgs=""
@@ -18,26 +18,11 @@ if [[ "$*" == *"lite"* ]]; then
   useLite=true
 fi
 
-if [ "$1" = "dev" ]; then
-  version="dev"
-  webVersion="rolling"
-elif [ "$1" = "beta" ]; then
-  version="beta"
-  webVersion="rolling"
-else
-  git tag -d beta || true
-  # Always true if there's no tag
-  version="${VERSION:-$(git describe --abbrev=0 --tags 2>/dev/null || echo "v0.0.0")}"
-  if [ -n "$FRONTEND_VERSION" ]; then
-    webVersion="$FRONTEND_VERSION"
-  else
-    webVersion=$(eval "curl -fsSL --max-time 2 $githubAuthArgs \"https://api.github.com/repos/$frontendRepo/releases/latest\"" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
-  fi
-fi
-
-if [ -n "$FRONTEND_VERSION" ]; then
-  webVersion="$FRONTEND_VERSION"
-fi
+source "$(dirname -- "${BASH_SOURCE[0]}")/scripts/resolve-versions.sh"
+version=$(resolve_release_version "${VERSION:-}" "${VERSION_REPO:-OpenListTeam/OpenList}")
+webVersion=$(resolve_release_version "${FRONTEND_VERSION:-}" "$frontendRepo")
+# Pin the resolved frontend tag for this entire invocation, including dev/beta.
+FRONTEND_VERSION=$webVersion
 
 echo "backend version: $version"
 echo "frontend version: $webVersion"
