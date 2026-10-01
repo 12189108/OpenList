@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/OpenList/v4/server/common"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -81,7 +80,7 @@ func putAsTask(ctx context.Context, dstDirPath string, file model.FileStreamer) 
 	t := &UploadTask{
 		TaskExtension: task.TaskExtension{
 			Creator: taskCreator,
-			ApiUrl:  common.GetApiUrl(ctx),
+			ApiUrl:  conf.GetApiUrl(ctx),
 		},
 		storage:          storage,
 		dstDirActualPath: dstDirActualPath,
@@ -110,10 +109,10 @@ func putDirectly(ctx context.Context, dstDirPath string, file model.FileStreamer
 	return op.Put(ctx, storage, dstDirActualPath, file, nil)
 }
 
-func getDirectUploadInfo(ctx context.Context, tool, dstDirPath, dstName string, fileSize int64) (any, error) {
+func getDirectUploadInfo(ctx context.Context, tool, dstDirPath, dstName string, fileSize int64, overwrite bool) (any, error) {
 	storage, dstDirActualPath, err := op.GetStorageAndActualPath(dstDirPath)
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed get storage")
 	}
-	return op.GetDirectUploadInfo(ctx, tool, storage, dstDirActualPath, dstName, fileSize)
+	return op.GetDirectUploadInfo(ctx, tool, storage, dstDirActualPath, dstName, fileSize, overwrite)
 }

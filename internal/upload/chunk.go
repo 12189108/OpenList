@@ -160,6 +160,9 @@ func (m *Manager) InitSession(args InitArgs) (*Session, error) {
 	// Try to find existing session for resumable upload
 	existing, err := m.findSessionByPathAndHash(args.User, normalizedPath, sha256Hash)
 	if err == nil && existing != nil && !isExpired(existing) {
+		if existing.Size != args.Size || existing.TotalChunks != args.TotalChunks {
+			return nil, fmt.Errorf("existing upload session size mismatch")
+		}
 		return existing, nil
 	}
 	now := time.Now()
@@ -304,6 +307,17 @@ func (m *Manager) CompleteReader(user *model.User, sessionID string) (*Session, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// Drivers may consume exactly Size bytes, never requesting EOF from the
+	// stream reader. Verify before handing off, including instant/task uploads.
+	hash := sha256.New()
+	if _, err := io.Copy(hash, io.NewSectionReader(file, session.HeaderSize, session.Size)); err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != session.Hashes["sha256"] {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("sha256 mismatch")
+	}
 	touchSession(session)
 	if err := writeSessionMeta(file, session); err != nil {
 		file.Close()
@@ -431,7 +445,7 @@ func (m *Manager) findSessionByPathAndHash(user *model.User, path string, sha256
 		if err != nil {
 			continue
 		}
-		if session.Path == path && normalizeHashes(session.Hashes)["sha256"] == sha256Hash && !isExpired(session) {
+		if session.UserID == user.ID && session.Path == path && normalizeHashes(session.Hashes)["sha256"] == sha256Hash && !isExpired(session) {
 			return session, nil
 		}
 	}
@@ -459,10 +473,10 @@ func (m *Manager) findSessionByID(userID uint, sessionID string) (*Session, erro
 }
 
 func (m *Manager) removeSessionLocked(session *Session) error {
-	m.mu.Delete(session.ID)
 	if session == nil {
 		return nil
 	}
+	m.mu.Delete(session.ID)
 	return os.Remove(session.tempPath)
 }
 
@@ -661,12 +675,14 @@ func trimZero(buf []byte) []byte {
 }
 
 type tempFileReader struct {
-	file     *os.File
-	reader   *io.SectionReader
-	expected string
-	hash     hashWriter
-	readSize int64
-	total    int64
+	file      *os.File
+	reader    *io.SectionReader
+	expected  string
+	hash      hashWriter
+	readSize  int64
+	total     int64
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type hashWriter interface {
@@ -695,7 +711,10 @@ func (r *tempFileReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (r *tempFileReader) Close() error { return r.file.Close() }
+func (r *tempFileReader) Close() error {
+	r.closeOnce.Do(func() { r.closeErr = r.file.Close() })
+	return r.closeErr
+}
 
 func normalizeHashes(h map[string]string) map[string]string {
 	dst := map[string]string{}

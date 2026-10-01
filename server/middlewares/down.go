@@ -17,7 +17,7 @@ import (
 
 func PathParse(c *gin.Context) {
 	rawPath := parsePath(c.Param("path"))
-	common.GinWithValue(c, conf.PathKey, rawPath)
+	common.GinAppendValues(c, conf.PathKey, rawPath)
 	c.Next()
 }
 
@@ -29,7 +29,7 @@ func Down(verifyFunc func(string, string) error) func(c *gin.Context) {
 			common.ErrorPage(c, err, 500, true)
 			return
 		}
-		common.GinWithValue(c, conf.MetaKey, meta)
+		common.GinAppendValues(c, conf.MetaKey, meta)
 		// verify sign
 		if needSign(meta, rawPath) {
 			s := c.Query("sign")
@@ -60,7 +60,7 @@ func needSign(meta *model.Meta, path string) bool {
 	if meta == nil || meta.Password == "" {
 		return false
 	}
-	if !meta.PSub && path != meta.Path {
+	if !meta.PSub && !common.MetaCoversPath(meta.Path, path, false) {
 		return false
 	}
 	return true

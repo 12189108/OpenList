@@ -44,14 +44,17 @@ func CanWriteContentBypassUserPerms(meta *model.Meta, path string) bool {
 	if meta == nil || !meta.Write {
 		return false
 	}
-	return MetaCoversPath(meta.Path, path, meta.WSub)
+	if utils.PathEqual(meta.Path, path) {
+		return true
+	}
+	return utils.IsSubPath(meta.Path, path) && meta.WSub
 }
 
 func CanAccess(user *model.User, meta *model.Meta, reqPath string, password string) bool {
 	// if the reqPath is in hide (only can check the nearest meta) and user can't see hides, can't access
 	if meta != nil && !user.CanSeeHides() && meta.Hide != "" &&
 		MetaCoversPath(meta.Path, path.Dir(reqPath), meta.HSub) { // the meta should apply to the parent of current path
-		for _, hide := range strings.Split(meta.Hide, "\n") {
+		for hide := range strings.SplitSeq(meta.Hide, "\n") {
 			re := regexp2.MustCompile(hide, regexp2.None)
 			if isMatch, _ := re.MatchString(path.Base(reqPath)); isMatch {
 				return false
@@ -78,10 +81,21 @@ func CanAccess(user *model.User, meta *model.Meta, reqPath string, password stri
 }
 
 func MetaCoversPath(metaPath, reqPath string, applyToSubFolder bool) bool {
-	if utils.PathEqual(metaPath, reqPath) {
+	metaPath = utils.FixAndCleanPath(metaPath)
+	reqPath = utils.FixAndCleanPath(reqPath)
+	if strings.EqualFold(metaPath, reqPath) {
 		return true
 	}
-	return utils.IsSubPath(metaPath, reqPath) && applyToSubFolder
+	if !applyToSubFolder {
+		return false
+	}
+	for reqPath != "/" {
+		reqPath = path.Dir(reqPath)
+		if strings.EqualFold(metaPath, reqPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // ShouldProxy TODO need optimize

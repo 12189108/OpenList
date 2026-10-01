@@ -95,6 +95,9 @@ const (
 	// thunder_browser
 	ThunderBrowserTempDir = "thunder_browser_temp_dir"
 
+	// guangyapan
+	GuangYaPanTempDir = "guangyapan_temp_dir"
+
 	// single
 	Token         = "token"
 	IndexProgress = "index_progress"
@@ -114,6 +117,7 @@ const (
 	SSODefaultDir        = "sso_default_dir"
 	SSODefaultPermission = "sso_default_permission"
 	SSOCompatibilityMode = "sso_compatibility_mode"
+	SSOPostMessageOrigin = "sso_postmessage_origin"
 
 	// ldap
 	LdapLoginEnabled      = "ldap_login_enabled"
@@ -161,6 +165,8 @@ const (
 	StreamMaxClientUploadSpeed            = "max_client_upload_speed"
 	StreamMaxServerDownloadSpeed          = "max_server_download_speed"
 	StreamMaxServerUploadSpeed            = "max_server_upload_speed"
+	MultipartEnabled                      = "multipart_enabled"
+	MultipartChunkSize                    = "multipart_chunk_size"
 )
 
 const (

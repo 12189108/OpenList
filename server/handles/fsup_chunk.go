@@ -3,7 +3,6 @@ package handles
 import (
 	"context"
 	"io"
-	"net/url"
 	stdpath "path"
 	"strings"
 	"time"
@@ -199,10 +198,13 @@ func FsChunkComplete(c *gin.Context) {
 		taskCtx := context.WithoutCancel(c.Request.Context())
 		taskInfo, err := fs.PutAsTask(taskCtx, dir, file)
 		if err != nil {
-			_ = upload.ChunkUpload.RemoveSession(user, session.ID)
+			_ = file.Close()
 			common.ErrorResp(c, err, 500)
 			return
 		}
+		// PutAsTask has cached the full stream. Release the original session
+		// file before unlinking it, including on Windows; the task owns the cache.
+		_ = reader.Close()
 		if err := upload.ChunkUpload.RemoveSession(user, session.ID); err != nil {
 			common.ErrorResp(c, err, 500)
 			return
@@ -217,7 +219,7 @@ func FsChunkComplete(c *gin.Context) {
 		return
 	}
 	if err := fs.PutDirectly(ctx, dir, file); err != nil {
-		_ = upload.ChunkUpload.RemoveSession(user, session.ID)
+		_ = file.Close()
 		common.ErrorResp(c, err, 500)
 		return
 	}
@@ -291,11 +293,8 @@ func ensureUploadWritable(_ context.Context, user *model.User, path string) erro
 }
 
 func decodeAndJoinUserPath(user *model.User, rawPath string) (string, error) {
-	path, err := url.PathUnescape(rawPath)
-	if err != nil {
-		return "", err
-	}
-	return user.JoinPath(path)
+	// The JSON body contains a literal path, unlike File-Path request headers.
+	return user.JoinPath(rawPath)
 }
 
 func lastModifiedFromMillis(value int64) time.Time {

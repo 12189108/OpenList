@@ -2,26 +2,29 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	stdpath "path"
 	"path/filepath"
+	"strings"
 
 	_115 "github.com/OpenListTeam/OpenList/v4/drivers/115"
 	_115_open "github.com/OpenListTeam/OpenList/v4/drivers/115_open"
 	_123 "github.com/OpenListTeam/OpenList/v4/drivers/123"
 	_123_open "github.com/OpenListTeam/OpenList/v4/drivers/123_open"
+	"github.com/OpenListTeam/OpenList/v4/drivers/guangyapan"
 	"github.com/OpenListTeam/OpenList/v4/drivers/pikpak"
 	"github.com/OpenListTeam/OpenList/v4/drivers/thunder"
 	"github.com/OpenListTeam/OpenList/v4/drivers/thunder_browser"
 	"github.com/OpenListTeam/OpenList/v4/drivers/thunderx"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/internal/task"
-	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 )
@@ -66,10 +69,32 @@ func AddURL(ctx context.Context, args *AddURLArgs) (task.TaskExtensionInfo, erro
 		}
 	}
 	// try putting url
-	if args.Tool == "SimpleHttp" {
+	if args.Tool == "SimpleHttp" && !isEd2kURL(args.URL) {
+		if isSimpleHttpSchemeUnsupported(args.URL) {
+			return nil, fmt.Errorf("SimpleHttp tool does not support this URL scheme, please use aria2 or other tools for magnet/ed2k links")
+		}
 		err = tryPutUrl(ctx, args.DstDirPath, args.URL)
 		if err == nil || !errors.Is(err, errs.NotImplement) {
 			return nil, err
+		}
+		// Fallback to creating a download task when storage lacks native PutURL support.
+	}
+
+	// ed2k 链接自动路由：如果当前工具不支持 ed2k，自动尝试使用迅雷系工具
+	if isEd2kURL(args.URL) {
+		if !isEd2kCapableTool(args.Tool) {
+			if storageTool := ed2kToolForStorage(storage); storageTool != "" {
+				// Prefer the matching native tool when the destination storage supports ed2k.
+				args.Tool = storageTool
+			} else {
+				// Otherwise, try to find an available Thunder-family tool.
+				fallbackTool, fallbackName := findEd2kCapableTool()
+				if fallbackTool != nil {
+					args.Tool = fallbackName
+				} else {
+					return nil, fmt.Errorf("ed2k protocol is not supported by %s. Please configure and use Thunder/ThunderX/ThunderBrowser for ed2k links", args.Tool)
+				}
+			}
 		}
 	}
 
@@ -142,13 +167,23 @@ func AddURL(ctx context.Context, args *AddURLArgs) (task.TaskExtensionInfo, erro
 		} else {
 			tempDir = filepath.Join(setting.GetStr(conf.ThunderXTempDir), uid)
 		}
+	case "GuangYaPan":
+		if _, ok := storage.(*guangyapan.GuangYaPan); ok {
+			tempDir = args.DstDirPath
+		} else {
+			tempBase := setting.GetStr(conf.GuangYaPanTempDir)
+			if tempBase == "" {
+				return nil, errors.New("GuangYaPan temp dir is not set")
+			}
+			tempDir = filepath.Join(tempBase, uid)
+		}
 	}
 
 	taskCreator, _ := ctx.Value(conf.UserKey).(*model.User) // taskCreator is nil when convert failed
 	t := &DownloadTask{
 		TaskExtension: task.TaskExtension{
 			Creator: taskCreator,
-			ApiUrl:  common.GetApiUrl(ctx),
+			ApiUrl:  conf.GetApiUrl(ctx),
 		},
 		Url:          args.URL,
 		DstDirPath:   args.DstDirPath,
@@ -170,4 +205,88 @@ func tryPutUrl(ctx context.Context, path, urlStr string) error {
 		dstName = "UnnamedURL"
 	}
 	return fs.PutURL(ctx, path, dstName, urlStr)
+}
+
+func isSimpleHttpSchemeUnsupported(urlStr string) bool {
+	u, err := url.Parse(strings.TrimSpace(urlStr))
+	if err != nil || u.Scheme == "" {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	return scheme != "http" && scheme != "https"
+}
+
+// isEd2kURL 检测 URL 是否为 ed2k 协议
+func isEd2kURL(urlStr string) bool {
+	return strings.HasPrefix(strings.ToLower(urlStr), "ed2k://")
+}
+
+func ed2kToolForStorage(storage driver.Driver) string {
+	name := NativeToolName(storage)
+	switch name {
+	case "115 Cloud", "115 Open":
+		return name
+	default:
+		return ""
+	}
+}
+
+// NativeToolName returns the offline-download tool implemented by storage.
+func NativeToolName(storage driver.Driver) string {
+	switch storage.(type) {
+	case *_115.Pan115:
+		return "115 Cloud"
+	case *_115_open.Open115:
+		return "115 Open"
+	case *_123.Pan123:
+		return "123Pan"
+	case *_123_open.Open123:
+		return "123 Open"
+	case *guangyapan.GuangYaPan:
+		return "GuangYaPan"
+	case *pikpak.PikPak:
+		return "PikPak"
+	case *thunder.Thunder:
+		return "Thunder"
+	case *thunderx.ThunderX:
+		return "ThunderX"
+	case *thunder_browser.ThunderBrowser, *thunder_browser.ThunderBrowserExpert:
+		return "ThunderBrowser"
+	default:
+		return ""
+	}
+}
+
+// ed2kCapableTools 支持 ed2k 协议的工具列表
+var ed2kCapableTools = []string{"115 Cloud", "115 Open", "Thunder", "ThunderX", "ThunderBrowser"}
+
+// ed2kFallbackTools 是当前可用于自动接管 ed2k 任务的工具列表。
+var ed2kFallbackTools = []string{"Thunder", "ThunderX", "ThunderBrowser"}
+
+// isEd2kCapableTool 检查工具是否支持 ed2k 协议
+func isEd2kCapableTool(toolName string) bool {
+	for _, t := range ed2kCapableTools {
+		if t == toolName {
+			return true
+		}
+	}
+	return false
+}
+
+// findEd2kCapableTool 查找一个可用的支持 ed2k 的工具
+func findEd2kCapableTool() (Tool, string) {
+	for _, name := range ed2kFallbackTools {
+		t, err := Tools.Get(name)
+		if err != nil {
+			continue
+		}
+		if t.IsReady() {
+			return t, name
+		}
+		// 尝试初始化
+		if _, err := t.Init(); err == nil && t.IsReady() {
+			return t, name
+		}
+	}
+	return nil, ""
 }

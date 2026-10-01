@@ -4,105 +4,93 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '请输入发布版本号 (例如: v1.0.0)'
+        description: "Backend release tag (e.g. v4.2.6-custom.1)"
         required: true
         type: string
-        default: 'v1.0.0'
+      frontend_version:
+        description: "Published tag from 12189108/OpenList-Frontend to embed"
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate release versions
+        env:
+          VERSION: ${{ inputs.version }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+        run: |
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          [[ "$VERSION" =~ $pattern && "$FRONTEND_VERSION" =~ $pattern ]]
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.25.0"
+          go-version-file: go.mod
 
-      - name: Setup web
-        # 拉取你指定的自有前端仓库
-        run: bash build.sh release web
+      - name: Embed the selected custom frontend
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_REPO: "12189108/OpenList-Frontend"
+          GH_TOKEN: ${{ github.token }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+        run: |
+          mkdir -p frontend-assets public/dist
+          gh release download "$FRONTEND_VERSION" --repo 12189108/OpenList-Frontend \
+            --pattern "openlist-frontend-dist-$FRONTEND_VERSION.tar.gz" --dir frontend-assets
+          tar -xzf "frontend-assets/openlist-frontend-dist-$FRONTEND_VERSION.tar.gz" -C public/dist
+          test -f public/dist/index.html
+          test "$(cat public/dist/VERSION)" = "$FRONTEND_VERSION"
 
-      - name: Install Toolchains
-        # 安装标准的 Linux ARM64 和 Windows 交叉编译器 (不用 Snap，极速且不报错)
+      - name: Test upload and request handling
+        run: go test ./internal/upload ./internal/multipart ./server/handles ./server/middlewares
+
+      - name: Install cross compilers
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-          
-          # 下载 Zig 用于 Windows ARM64
-          wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
-          tar -xf zig-linux-x86_64-0.11.0.tar.xz
+          curl -fL https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          chmod +x wrapper/zcc-arm64 wrapper/zcxx-arm64
 
-      - name: Build Binaries
+      - name: Build four platform binaries
+        env:
+          VERSION: ${{ inputs.version }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
         run: |
-          # 准备环境变量
           export PATH="$PWD/zig-linux-x86_64-0.11.0:$PATH"
           export CGO_ENABLED=1
-          
           mkdir -p build
-          VERSION="${{ github.event.inputs.version }}"
           BUILT_AT="$(date +'%F %T %z')"
-          GIT_AUTHOR="The OpenList Projects Contributors <noreply@openlist.team>"
-          GIT_COMMIT=$(git log --pretty=format:"%h" -1 || echo "unknown")
-          
-          echo "==== 1. 编译 Linux AMD64 (标准版，你的服务器能直接跑) ===="
-          GOOS=linux GOARCH=amd64 CC=gcc CXX=g++ \
-          go build -o build/openlist-linux-amd64 \
-          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
-          -tags=jsoniter .
-          
-          echo "==== 2. 编译 Linux ARM64 (标准版) ===="
-          GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-          go build -o build/openlist-linux-arm64 \
-          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
-          -tags=jsoniter .
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$FRONTEND_VERSION'"
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            export GOOS=${target%/*}
+            export GOARCH=${target#*/}
+            case "$target" in
+              linux/amd64) export CC=gcc CXX=g++ ;;
+              linux/arm64) export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ ;;
+              windows/amd64) export CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ ;;
+              windows/arm64) export CC="$PWD/wrapper/zcc-arm64" CXX="$PWD/wrapper/zcxx-arm64" ;;
+            esac
+            output="build/openlist-$GOOS-$GOARCH"
+            if [[ "$GOOS" == windows ]]; then output="$output.exe"; fi
+            go build -o "$output" -ldflags="$LDFLAGS" -tags=jsoniter .
+          done
 
-          echo "==== 3. 编译 Windows AMD64 ===="
-          GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
-          go build -o build/openlist-windows-amd64.exe \
-          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
-          -tags=jsoniter .
-
-          echo "==== 4. 编译 Windows ARM64 ===="
-          chmod +x ./wrapper/zcc-arm64 ./wrapper/zcxx-arm64
-          GOOS=windows GOARCH=arm64 CC=$PWD/wrapper/zcc-arm64 CXX=$PWD/wrapper/zcxx-arm64 \
-          go build -o build/openlist-windows-arm64.exe \
-          -ldflags="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=$GIT_AUTHOR' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=rolling'" \
-          -tags=jsoniter .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openlist-binaries
-          path: build/*
-
-  release:
-    needs: build
-    name: Publish Release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: build-assets
-          merge-multiple: true
-
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.version }}
-          name: Release ${{ github.event.inputs.version }}
-          files: build-assets/*
-          draft: false
-          prerelease: false
+      - name: Publish custom release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$VERSION" --target "$GITHUB_SHA" \
+            --title "Release $VERSION" --generate-notes build/*
