@@ -26,6 +26,7 @@ output/
 *.json
 !renovate.json
 /build
+/.build/
 /data/
 /tmp/
 /log/

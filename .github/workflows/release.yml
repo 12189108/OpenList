@@ -1,16 +1,33 @@
-name: Custom Release
+name: Custom Build
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Backend release tag (e.g. v4.2.6-custom.1)"
-        required: true
+        description: "后端版本号；留空获取官方最新正式版号，编译当前分支"
+        required: false
         type: string
+      frontend_mode:
+        description: "源码编译保留前端新功能，或下载已发布的前端"
+        type: choice
+        options: [source, release]
+        default: source
+      frontend_repo:
+        description: "前端仓库 owner/repo"
+        type: string
+        default: "12189108/OpenList-Frontend"
+      frontend_ref:
+        description: "源码模式：前端分支、标签或 SHA"
+        type: string
+        default: "main"
       frontend_version:
-        description: "Published tag from 12189108/OpenList-Frontend to embed"
-        required: true
+        description: "前端版本；留空：源码模式取官方最新正式版号，Release 模式取所选仓库最新正式版"
+        required: false
         type: string
+      publish:
+        description: "同时发布 GitHub Release（版本标签必须尚不存在）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -23,74 +40,74 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout backend
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Validate release versions
-        env:
-          VERSION: ${{ inputs.version }}
-          FRONTEND_VERSION: ${{ inputs.frontend_version }}
-        run: |
-          pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
-          [[ "$VERSION" =~ $pattern && "$FRONTEND_VERSION" =~ $pattern ]]
+      - name: Checkout frontend source
+        if: inputs.frontend_mode == 'source'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ inputs.frontend_repo }}
+          ref: ${{ inputs.frontend_ref }}
+          path: .build/frontend
+          persist-credentials: false
+
+      - name: Setup Node
+        if: inputs.frontend_mode == 'source'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Setup frontend pnpm
+        if: inputs.frontend_mode == 'source'
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: .build/frontend/package.json
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
-      - name: Embed the selected custom frontend
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FRONTEND_VERSION: ${{ inputs.frontend_version }}
-        run: |
-          mkdir -p frontend-assets public/dist
-          gh release download "$FRONTEND_VERSION" --repo 12189108/OpenList-Frontend \
-            --pattern "openlist-frontend-dist-$FRONTEND_VERSION.tar.gz" --dir frontend-assets
-          tar -xzf "frontend-assets/openlist-frontend-dist-$FRONTEND_VERSION.tar.gz" -C public/dist
-          test -f public/dist/index.html
-          test "$(cat public/dist/VERSION)" = "$FRONTEND_VERSION"
-
-      - name: Test upload and request handling
-        run: go test ./internal/upload ./internal/multipart ./server/handles ./server/middlewares
-
       - name: Install cross compilers
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
           curl -fL https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz -o zig.tar.xz
           tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-0.11.0" >> "$GITHUB_PATH"
           chmod +x wrapper/zcc-arm64 wrapper/zcxx-arm64
 
-      - name: Build four platform binaries
-        env:
-          VERSION: ${{ inputs.version }}
-          FRONTEND_VERSION: ${{ inputs.frontend_version }}
-        run: |
-          export PATH="$PWD/zig-linux-x86_64-0.11.0:$PATH"
-          export CGO_ENABLED=1
-          mkdir -p build
-          BUILT_AT="$(date +'%F %T %z')"
-          GIT_COMMIT=$(git rev-parse --short HEAD)
-          LDFLAGS="-s -w -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.BuiltAt=$BUILT_AT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitAuthor=The OpenList Projects Contributors <noreply@oplist.org>' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.GitCommit=$GIT_COMMIT' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.Version=$VERSION' -X 'github.com/OpenListTeam/OpenList/v4/internal/conf.WebVersion=$FRONTEND_VERSION'"
-          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
-            export GOOS=${target%/*}
-            export GOARCH=${target#*/}
-            case "$target" in
-              linux/amd64) export CC=gcc CXX=g++ ;;
-              linux/arm64) export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ ;;
-              windows/amd64) export CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ ;;
-              windows/arm64) export CC="$PWD/wrapper/zcc-arm64" CXX="$PWD/wrapper/zcxx-arm64" ;;
-            esac
-            output="build/openlist-$GOOS-$GOARCH"
-            if [[ "$GOOS" == windows ]]; then output="$output.exe"; fi
-            go build -o "$output" -ldflags="$LDFLAGS" -tags=jsoniter .
-          done
-
-      - name: Publish custom release
+      - name: Compile backend with selected frontend
+        id: build
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
+          FRONTEND_MODE: ${{ inputs.frontend_mode }}
+          FRONTEND_REPO: ${{ inputs.frontend_repo }}
+          FRONTEND_REF: ${{ inputs.frontend_ref }}
+          FRONTEND_VERSION: ${{ inputs.frontend_version }}
+          FRONTEND_SOURCE_DIR: ${{ github.workspace }}/.build/frontend
+        run: bash scripts/build-custom.sh
+
+      - name: Upload binaries and build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlist-${{ steps.build.outputs.version }}
+          path: build/*
+          if-no-files-found: error
+
+      - name: Publish custom release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
         run: |
-          gh release create "$VERSION" --target "$GITHUB_SHA" \
-            --title "Release $VERSION" --generate-notes build/*
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>&1; then
+            echo "标签 $VERSION 已存在，请指定新的自定义版本号。" >&2
+            exit 1
+          fi
+          args=()
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$VERSION" --target "$GITHUB_SHA" --title "Release $VERSION" \
+            --generate-notes "${args[@]}" build/*
