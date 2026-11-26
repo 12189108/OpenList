@@ -386,6 +386,19 @@ func TestInitResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	m.mu.Lock()
+	firstSession := m.byID[snap.ID]
+	m.mu.Unlock()
+	sessions := []*Session{firstSession}
+	t.Cleanup(func() {
+		for _, session := range sessions {
+			if session == nil {
+				continue
+			}
+			m.terminate(session, context.Canceled)
+			<-session.done
+		}
+	})
 	sendChunk(t, m, user, snap.ID, data, 2, chunkSize)
 
 	// same hashes prove the same file: resume with buffered chunks skippable
@@ -405,6 +418,9 @@ func TestInitResume(t *testing.T) {
 	if err != nil || resumed || other.ID == snap.ID {
 		t.Fatalf("different-size Init = (id=%s, resumed=%v, err=%v)", other.ID, resumed, err)
 	}
+	m.mu.Lock()
+	sessions = append(sessions, m.byID[other.ID])
+	m.mu.Unlock()
 
 	if _, err := m.Find(user, "/local/test.bin", totalSize); err != nil {
 		t.Fatalf("Find: %v", err)
@@ -421,6 +437,9 @@ func TestInitResume(t *testing.T) {
 	if err != nil || resumed || fresh.ID == snap.ID {
 		t.Fatalf("bare re-Init = (id=%s, resumed=%v, err=%v), want a fresh session", fresh.ID, resumed, err)
 	}
+	m.mu.Lock()
+	sessions = append(sessions, m.byID[fresh.ID])
+	m.mu.Unlock()
 	if _, err := m.Status(user, snap.ID); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("superseded session err = %v, want ErrSessionNotFound", err)
 	}

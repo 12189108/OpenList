@@ -54,7 +54,7 @@ func TestIsSearchNodeAccessible(t *testing.T) {
 		},
 		{
 			name:         "outside base path",
-			basePath:     "/private",
+			basePath:     "/team",
 			node:         model.SearchNode{Parent: "/other", Name: "private", IsDir: true},
 			want:         false,
 			wantMetaPath: "",
